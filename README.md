@@ -1,73 +1,151 @@
-# React + TypeScript + Vite
+# 🍯 Honeypot Observer Dashboard
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+A modern, real-time cybersecurity dashboard for monitoring and analyzing honeypot attacks using Cowrie framework and ELK stack.
 
-Currently, two official plugins are available:
+## 🎓 Academic Project
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Babel](https://babeljs.io/) (or [oxc](https://oxc.rs) when used in [rolldown-vite](https://vite.dev/guide/rolldown)) for Fast Refresh
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/) for Fast Refresh
 
-## React Compiler
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+## 📊 Project Status
 
-## Expanding the ESLint configuration
+🚧 **Phase 1: Frontend Development** ✅ COMPLETED  
+🚧 **Phase 2: Backend Integration** 🔄 IN PROGRESS  
+🚧 **Phase 3: Live Deployment** ⏳ PENDING
 
-If you are developing a production application, we recommend updating the configuration to enable type-aware lint rules:
+## 🛠️ Tech Stack
 
-```js
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
+### Frontend
+- **Framework:** React 18 + TypeScript
+- **Styling:** Tailwind CSS
+- **Charts:** Recharts
+- **Icons:** Lucide React
+- **Build Tool:** Vite
 
-      // Remove tseslint.configs.recommended and replace with this
-      tseslint.configs.recommendedTypeChecked,
-      // Alternatively, use this for stricter rules
-      tseslint.configs.strictTypeChecked,
-      // Optionally, add this for stylistic rules
-      tseslint.configs.stylisticTypeChecked,
+### Backend (Planned)
+- **Honeypot:** Cowrie SSH/Telnet Honeypot
+- **Data Stack:** Elasticsearch, Logstash, Kibana (ELK)
+- **API:** Node.js/Express
+- **Real-time:** Socket.IO/WebSockets
 
-      // Other configs...
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
+## ✨ Features
+
+### Implemented ✅
+- [x] Real-time dashboard with live statistics
+- [x] Interactive attack session monitoring
+- [x] Analytics with charts and visualizations
+- [x] Alert management system with investigation modals
+- [x] Geographic attack origin mapping
+- [x] Behavioral analytics and attacker profiling
+- [x] MITRE ATT&CK framework mapping
+- [x] Data export center (CSV, JSON, Excel, PDF)
+- [x] Professional UI/UX with dark/light themes
+- [x] Responsive design for all devices
+
+### In Development 🔄
+- [ ] Integration with real Cowrie honeypot data
+- [ ] Elasticsearch backend connection
+- [ ] WebSocket for real-time updates
+- [ ] Authentication system
+- [ ] Database for persistent storage
+
+## 🚀 Getting Started
+
+### Prerequisites
+```bash
+node >= 18.0.0
+npm >= 9.0.0
 ```
 
-You can also install [eslint-plugin-react-x](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-x) and [eslint-plugin-react-dom](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-dom) for React-specific lint rules:
+### Installation
 
-```js
-// eslint.config.js
-import reactX from 'eslint-plugin-react-x'
-import reactDom from 'eslint-plugin-react-dom'
-
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-      // Enable lint rules for React
-      reactX.configs['recommended-typescript'],
-      // Enable lint rules for React DOM
-      reactDom.configs.recommended,
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
+1. Clone the repository
+```bash
+git clone https://github.com/YOUR_USERNAME/honeypot-observer.git
+cd honeypot-observer
 ```
+
+2. Install dependencies
+```bash
+npm install
+```
+
+3. Run development server
+```bash
+npm run dev
+```
+
+4. Open browser to `http://localhost:3000`
+
+### Build for Production
+```bash
+npm run build
+npm run preview
+```
+
+## 📁 Project Structure
+```
+honeypot-observer/
+├── src/
+│   ├── components/
+│   │   ├── layout/          # Sidebar, TopBar, StatCard
+│   │   └── sessions/        # SessionCard
+│   ├── pages/
+│   │   ├── Dashboard.tsx
+│   │   ├── LiveSessions.tsx
+│   │   ├── Analytics.tsx
+│   │   ├── Alerts.tsx
+│   │   ├── GeoMap.tsx
+│   │   ├── BehavioralAnalytics.tsx
+│   │   ├── DataExport.tsx
+│   │   └── Settings.tsx
+│   ├── types/               # TypeScript definitions
+│   ├── utils/               # Helper functions
+│   ├── App.tsx
+│   └── main.tsx
+├── public/
+├── package.json
+└── README.md
+```
+
+## 🎨 Screenshots
+
+> **Note:** Screenshots will be added after backend integration
+
+## 🔐 Security Note
+
+⚠️ **This is a development version with mock data.**  
+Real honeypot data will be integrated in Phase 2.  
+No sensitive or production data is included in this repository.
+
+## 📚 Documentation
+
+### Mock Data
+Currently using simulated attack data for UI development:
+- Attack feed: Randomized IP addresses and attack types
+- Sessions: Simulated SSH connection data
+- Analytics: Generated statistics and charts
+- Geographic: Sample country-wise attack distribution
+
+### Future Integration
+Backend will connect to:
+- Cowrie honeypot logs
+- Elasticsearch indices
+- Real-time attack stream
+
+## 🎯 Learning Objectives
+
+1. ✅ Frontend development with React + TypeScript
+2. ✅ Data visualization and charts
+3. ✅ Responsive UI/UX design
+4. 🔄 Backend API development
+5. 🔄 Database integration
+6. 🔄 Real-time data streaming
+7. ⏳ Cybersecurity concepts and honeypot analysis
+
+
+
+## 📄 License
+
+This project is for academic purposes only.
+
+
