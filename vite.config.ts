@@ -24,14 +24,17 @@ export default defineConfig({
       'date-fns',
       'clsx'
     ],
-    // Force re-optimization on dependency changes
-    force: false,
+    // Use esbuild for pre-bundling (fast)
+    esbuildOptions: {
+      target: 'esnext',
+    },
   },
   
   // Build optimizations
   build: {
-    // Use faster minifier
+    // Use esbuild minifier (fastest)
     minify: 'esbuild',
+    
     // Optimize chunk sizes
     rollupOptions: {
       output: {
@@ -40,37 +43,82 @@ export default defineConfig({
           'react-vendor': ['react', 'react-dom', 'react-router-dom'],
           'chart-vendor': ['recharts'],
           'icon-vendor': ['lucide-react'],
+          'utils-vendor': ['axios', 'date-fns', 'clsx', 'socket.io-client'],
         },
       },
     },
-    // Speed up builds
+    
+    // Target modern browsers for better performance
     target: 'esnext',
-    // Source maps for debugging (set to false for production)
+    
+    // Disable source maps in production for smaller builds
     sourcemap: false,
+    
+    // Increase chunk size warning limit
+    chunkSizeWarningLimit: 1000,
+    
+    // CSS code splitting
+    cssCodeSplit: true,
+    
+    // Optimize dependencies
+    commonjsOptions: {
+      transformMixedEsModules: true,
+    },
   },
   
   server: {
     port: 3000,
+    
+    // Enable strict port (fail if port is in use)
+    strictPort: false,
+    
     // Enable HMR (Hot Module Replacement)
     hmr: {
       overlay: true,
     },
+    
     // Open browser automatically
     open: true,
+    
+    // Enable CORS
+    cors: true,
+    
     proxy: {
       '/api': {
-        target: 'http://localhost:5000',
+        target: 'http://localhost:5001',  // ← Changed to 5001
         changeOrigin: true,
+        secure: false,
       },
       '/ws': {
-        target: 'ws://localhost:5000',
+        target: 'ws://localhost:5001',    // ← Changed to 5001
         ws: true,
+        changeOrigin: true,
       }
-    }
+    },
+    
+    // File system watching
+    watch: {
+      // Ignore node_modules for better performance
+      ignored: ['**/node_modules/**', '**/.git/**'],
+    },
   },
   
   // CSS optimization
   css: {
     devSourcemap: false,
+  },
+  
+  // Enable JSON imports
+  json: {
+    namedExports: true,
+    stringify: false,
+  },
+  
+  // Performance optimizations
+  esbuild: {
+    // Drop console and debugger in production
+    drop: process.env.NODE_ENV === 'production' ? ['console', 'debugger'] : [],
+    // Use latest JavaScript features
+    target: 'esnext',
   },
 })
