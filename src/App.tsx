@@ -6,12 +6,11 @@ import { LiveSessions } from './pages/LiveSessions';
 
 // Lazy load heavy pages for better performance
 const Analytics = lazy(() => import('./pages/Analytics').then(m => ({ default: m.Analytics })));
-const Alerts = lazy(() => import('./pages/Alerts').then(m => ({ default: m.Alerts })));
-const GeoMap = lazy(() => import('./pages/GeoMap').then(m => ({ default: m.GeoMap })));
-const BehavioralAnalytics = lazy(() => import('./pages/BehavioralAnalytics').then(m => ({ default: m.BehavioralAnalytics })));
-const DataExport = lazy(() => import('./pages/DataExport').then(m => ({ default: m.DataExport })));
-const Settings = lazy(() => import('./pages/Settings').then(m => ({ default: m.Settings })));
-
+const Alerts = lazy(() => import('./pages/Alerts'));  // ✅ FIXED
+const GeoMap = lazy(() => import('./pages/GeoMap'));
+const BehavioralAnalytics = lazy(() => import('./pages/BehavioralAnalytics'));  // ✅ FIXED
+const DataExport = lazy(() => import('./pages/DataExport'));
+const Settings = lazy(() => import('./pages/Settings'));
 export default function App() {
   const [currentPage, setCurrentPage] = useState('dashboard');
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
