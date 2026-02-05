@@ -10,13 +10,18 @@
   },
   "dependencies": {
     "@elastic/elasticsearch": "^8.19.1",
+    "bcryptjs": "^3.0.3",
     "compression": "^1.8.1",
     "cors": "^2.8.6",
     "dotenv": "^16.6.1",
     "express": "^4.22.1",
     "geoip-lite": "^1.4.10",
     "helmet": "^7.2.0",
-    "socket.io": "^4.8.3"
+    "jsonwebtoken": "^9.0.3",
+    "mongoose": "^9.1.5",
+    "nodemailer": "^7.0.13",
+    "socket.io": "^4.8.3",
+    "twilio": "^5.12.0"
   },
   "devDependencies": {
     "nodemon": "^3.0.2"

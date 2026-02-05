@@ -1,5 +1,5 @@
 import { 
-  Shield, Activity, TrendingUp, Globe, AlertTriangle, 
+  Shield, Activity, TrendingUp, AlertTriangle, 
   Brain, Download, Settings, ChevronRight, X, BarChart3 
 } from 'lucide-react';
 
@@ -8,19 +8,28 @@ interface SidebarProps {
   currentPage: string;
   onNavigate: (page: string) => void;
   onToggle: () => void;
+  userRole?: 'admin' | 'member'; // ✅ NEW: Add userRole prop
 }
 
-export function Sidebar({ collapsed, currentPage, onNavigate, onToggle }: SidebarProps) {
-  const navItems = [
+export function Sidebar({ collapsed, currentPage, onNavigate, onToggle, userRole }: SidebarProps) {
+  // ✅ MODIFIED: Filter out settings if user is not admin
+  const allNavItems = [
     { id: 'dashboard', icon: BarChart3, label: 'Dashboard' },
     { id: 'live-sessions', icon: Activity, label: 'Live Sessions' },
     { id: 'analytics', icon: TrendingUp, label: 'Analytics' },
-    { id: 'geomap', icon: Globe, label: 'Geo Map' },
     { id: 'alerts', icon: AlertTriangle, label: 'Alerts' },
     { id: 'behavior', icon: Brain, label: 'Behavior' },
     { id: 'export', icon: Download, label: 'Data Export' },
-    { id: 'settings', icon: Settings, label: 'Settings' }
+    { id: 'settings', icon: Settings, label: 'Settings', adminOnly: true } // ✅ NEW: Mark as admin only
   ];
+
+  // ✅ NEW: Filter nav items based on user role
+  const navItems = allNavItems.filter(item => {
+    if (item.adminOnly) {
+      return userRole === 'admin';
+    }
+    return true;
+  });
 
   return (
     <aside

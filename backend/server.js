@@ -1,5 +1,5 @@
 // ============================================
-// COMPLETE FIXED BACKEND SERVER - ALL ISSUES RESOLVED
+// HONEYPOT BACKEND SERVER - WITH NOTIFICATIONS
 // ============================================
 import express from 'express';
 import cors from 'cors';
@@ -10,10 +10,17 @@ import { Server } from 'socket.io';
 import { Client } from '@elastic/elasticsearch';
 import dotenv from 'dotenv';
 import geoip from 'geoip-lite';
+import connectDB from './config/database.js';
+import { authRouter, authenticateToken, requireAdmin } from './auth.js';
+
+// ✅ NEW: Import notification routes and service
+import notificationRouter from './routes/notifications.js';
+import notificationService from './services/notificationService.js';
 
 dotenv.config();
 
 const app = express();
+await connectDB();
 const httpServer = createServer(app);
 const io = new Server(httpServer, {
   cors: {
@@ -29,10 +36,12 @@ app.use(cors({
   origin: process.env.CORS_ORIGIN || 'http://localhost:3000'
 }));
 app.use(express.json());
+app.use('/api/auth', authRouter);
 
-// ============================================
-// FIX #1: SIMPLIFIED ELASTICSEARCH HEADERS
-// ============================================
+// ✅ NEW: Register notification routes
+app.use('/api/notifications', notificationRouter);
+
+// Elasticsearch Client
 const esClient = new Client({
   node: process.env.ELASTICSEARCH_URL || 'http://192.168.56.101:9200'
 });
@@ -77,7 +86,6 @@ function getCountryFromIP(ip) {
 // Background task to monitor sessions and mark as closed
 async function monitorSessions() {
   try {
-    // Get all session.closed events from last 10 minutes
     const response = await esClient.search({
       index: process.env.ELASTICSEARCH_INDEX || 'cowrie-*',
       size: 1000,
@@ -103,7 +111,6 @@ async function monitorSessions() {
       }
     });
 
-    // Mark these sessions as closed
     response.hits.hits.forEach(hit => {
       const sessionId = hit._source.session;
       if (activeSessions.has(sessionId)) {
@@ -116,8 +123,6 @@ async function monitorSessions() {
     console.error('Error monitoring sessions:', error.message);
   }
 }
-// Run session monitor every 5 seconds
-//setInterval(monitorSessions, 5000);
 
 // Health Check
 app.get('/api/health', async (req, res) => {
@@ -146,7 +151,6 @@ app.get('/api/health', async (req, res) => {
 // Get Dashboard Statistics
 app.get('/api/dashboard/stats', async (req, res) => {
   try {
-    // Get total attacks from today
     const todayStart = new Date();
     todayStart.setHours(0, 0, 0, 0);
 
@@ -163,7 +167,6 @@ app.get('/api/dashboard/stats', async (req, res) => {
       }
     });
 
-    // Get unique countries
     const countriesResponse = await esClient.search({
       index: process.env.ELASTICSEARCH_INDEX || 'cowrie-*',
       size: 0,
@@ -192,7 +195,6 @@ app.get('/api/dashboard/stats', async (req, res) => {
       uniqueCountries.add(geoData.country);
     });
 
-    // Active sessions count
     const activeSessionsCount = Array.from(activeSessions.values()).length;
 
     res.json({
@@ -221,7 +223,6 @@ app.get('/api/dashboard/attacks', async (req, res) => {
       const ip = source.src_ip || source.source_ip || 'unknown';
       const geoData = getCountryFromIP(ip);
 
-      // Determine severity based on event type
       let severity = 'medium';
       if (source.eventid === 'cowrie.login.success') severity = 'critical';
       else if (source.eventid === 'cowrie.command.input') severity = 'high';
@@ -230,6 +231,7 @@ app.get('/api/dashboard/attacks', async (req, res) => {
 
       return {
         id: hit._id,
+        session: source.session || null,
         timestamp: source['@timestamp'] || source.timestamp,
         ip: ip,
         country: geoData.country,
@@ -247,148 +249,153 @@ app.get('/api/dashboard/attacks', async (req, res) => {
   }
 });
 
-// REPLACE your existing /api/sessions/live endpoint with this improved version
-// This shows sessions from the last 7 days with time indicators
+// Get Live Sessions
 app.get('/api/sessions/live', async (req, res) => {
   try {
-    console.log('📊 Fetching sessions (last 7 days)...');
+    const { range } = req.query;
+    console.log(`\n📊 [SESSIONS] Fetching sessions for range: ${range || '24h'}`);
     
-    // Look back 7 days instead of just 2 hours
-    const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 3600000).toISOString();
+    // Calculate time ranges
+    let esRange = 'now-24h';
+    let jsTimeFilter = Date.now() - (24 * 60 * 60 * 1000);
 
-    // Step 1: Get all session.connect events
-    const connectResponse = await esClient.search({
-      index: process.env.ELASTICSEARCH_INDEX || 'cowrie-*',
-      size: 1000,
-      body: {
-        query: {
-          bool: {
-            must: [
-              { term: { 'eventid.keyword': 'cowrie.session.connect' } },
-              { range: { '@timestamp': { gte: sevenDaysAgo } } }
-            ]
-          }
-        },
-        sort: [{ '@timestamp': { order: 'desc' } }]
-      }
-    });
+    switch (range) {
+      case '1h':
+        esRange = 'now-1h';
+        jsTimeFilter = Date.now() - (60 * 60 * 1000);
+        break;
+      case '24h':
+        esRange = 'now-24h';
+        jsTimeFilter = Date.now() - (24 * 60 * 60 * 1000);
+        break;
+      case '7d':
+        esRange = 'now-7d';
+        jsTimeFilter = Date.now() - (7 * 24 * 60 * 60 * 1000);
+        break;
+      case 'all':
+        esRange = null;
+        jsTimeFilter = null;
+        break;
+    }
 
-    console.log(`✅ Found ${connectResponse.hits.hits.length} connection events`);
+    console.log(`   Time filter: ${esRange || 'none'}`);
 
-    // Step 2: Get all session.closed events
-    const closedResponse = await esClient.search({
-      index: process.env.ELASTICSEARCH_INDEX || 'cowrie-*',
-      size: 1000,
-      body: {
-        query: {
-          bool: {
-            must: [
-              { term: { 'eventid.keyword': 'cowrie.session.closed' } },
-              { range: { '@timestamp': { gte: sevenDaysAgo } } }
-            ]
-          }
+    // ✅ STRATEGY: Get all events, then group by session in JavaScript
+    // This avoids aggregation issues with .keyword fields
+    
+    const queryBody = esRange ? {
+      query: {
+        range: {
+          '@timestamp': { gte: esRange }
         }
-      }
+      },
+      sort: [{ '@timestamp': { order: 'asc' } }],
+      size: 10000 // Get all recent events
+    } : {
+      sort: [{ '@timestamp': { order: 'asc' } }],
+      size: 10000
+    };
+
+    console.log(`   Fetching events with query:`, JSON.stringify(queryBody, null, 2));
+
+    const allEvents = await esClient.search({
+      index: process.env.ELASTICSEARCH_INDEX || 'cowrie-*',
+      body: queryBody
     });
 
-    console.log(`✅ Found ${closedResponse.hits.hits.length} closed events`);
+    console.log(`   ✅ Found ${allEvents.hits.hits.length} events`);
 
-    // Build map of closed sessions with their end times
-    const closedSessionsMap = new Map();
-    closedResponse.hits.hits.forEach(hit => {
-      if (hit._source?.session) {
-        closedSessionsMap.set(hit._source.session, {
-          endTime: new Date(hit._source['@timestamp'])
-        });
-      }
-    });
+    if (allEvents.hits.hits.length === 0) {
+      console.log('   ❌ No events found in time range\n');
+      return res.json([]);
+    }
 
-    // Step 3: Build sessions list with all data
-    const sessionsMap = new Map();
+    // ✅ Group events by session ID manually
+    const sessionEventsMap = new Map();
     
-    for (const hit of connectResponse.hits.hits) {
+    allEvents.hits.hits.forEach(hit => {
       const source = hit._source;
-      if (!source?.session) continue;
-      
       const sessionId = source.session;
       
-      // Skip duplicates
-      if (sessionsMap.has(sessionId)) continue;
+      if (!sessionId) return; // Skip events without session ID
+      
+      if (!sessionEventsMap.has(sessionId)) {
+        sessionEventsMap.set(sessionId, []);
+      }
+      
+      sessionEventsMap.get(sessionId).push({
+        timestamp: source['@timestamp'],
+        eventid: source.eventid,
+        src_ip: source.src_ip || source.source_ip,
+        input: source.input,
+        message: source.message
+      });
+    });
 
-      const ip = source.src_ip || source.source_ip || 'unknown';
+    console.log(`   ✅ Found ${sessionEventsMap.size} unique sessions`);
+
+    // ✅ Build session objects
+    const sessionsMap = new Map();
+    const now = Date.now();
+
+    for (const [sessionId, events] of sessionEventsMap.entries()) {
+      // Sort events by timestamp
+      events.sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
+      
+      const firstEvent = events[0];
+      const lastEvent = events[events.length - 1];
+      
+      const startTime = new Date(firstEvent.timestamp);
+      const startTimeMs = startTime.getTime();
+      
+      // ✅ Apply client-side time filter based on session START time
+      if (jsTimeFilter && startTimeMs < jsTimeFilter) {
+        continue; // Skip sessions that started before our time range
+      }
+      
+      const ip = firstEvent.src_ip || 'unknown';
       const geoData = getCountryFromIP(ip);
-      const startTime = new Date(source['@timestamp']);
-      const now = Date.now();
       
       // Check if session is closed
-      const isClosed = closedSessionsMap.has(sessionId);
-      const endTime = isClosed ? closedSessionsMap.get(sessionId).endTime : null;
-
+      const isClosed = events.some(e => e.eventid === 'cowrie.session.closed');
+      const lastEventTime = new Date(lastEvent.timestamp);
+      
       // Calculate duration
       let duration;
-      if (isClosed && endTime) {
-        // Closed session: duration = end - start
-        duration = Math.floor((endTime - startTime) / 1000);
+      if (isClosed) {
+        duration = Math.floor((lastEventTime - startTime) / 1000);
       } else {
-        // Still active: duration = now - start
-        duration = Math.floor((now - startTime.getTime()) / 1000);
+        duration = Math.floor((now - startTimeMs) / 1000);
       }
-
-      // Count commands for this session
-      let commands = 0;
-      try {
-        const cmdCount = await esClient.count({
-          index: process.env.ELASTICSEARCH_INDEX || 'cowrie-*',
-          body: {
-            query: {
-              bool: {
-                must: [
-                  { term: { 'session.keyword': sessionId } },
-                  { term: { 'eventid.keyword': 'cowrie.command.input' } }
-                ]
-              }
-            }
-          }
-        });
-        commands = cmdCount.count || 0;
-      } catch (err) {
-        console.log(`⚠️ Could not count commands for ${sessionId}`);
-      }
-
-      // Calculate risk based on commands and activity
+      
+      // Count commands
+      const commands = events.filter(e => e.eventid === 'cowrie.command.input').length;
+      
+      // Calculate risk
       let risk = 3;
       if (commands > 20) risk = 10;
       else if (commands > 10) risk = 9;
       else if (commands > 5) risk = 7;
       else if (commands > 2) risk = 5;
-
-      // Calculate how long ago this session started
-      const timeDiff = now - startTime.getTime();
-      const hoursAgo = Math.floor(timeDiff / (1000 * 60 * 60));
+      
+      // Calculate time ago
+      const timeDiff = now - startTimeMs;
       const minutesAgo = Math.floor(timeDiff / (1000 * 60));
+      const hoursAgo = Math.floor(timeDiff / (1000 * 60 * 60));
       const daysAgo = Math.floor(timeDiff / (1000 * 60 * 60 * 24));
-
+      
       let timeAgo;
-      if (daysAgo > 0) {
-        timeAgo = `${daysAgo}d ago`;
-      } else if (hoursAgo > 0) {
-        timeAgo = `${hoursAgo}h ago`;
-      } else if (minutesAgo > 0) {
-        timeAgo = `${minutesAgo}m ago`;
-      } else {
-        timeAgo = 'now';
-      }
-
+      if (daysAgo > 0) timeAgo = `${daysAgo}d ago`;
+      else if (hoursAgo > 0) timeAgo = `${hoursAgo}h ago`;
+      else if (minutesAgo > 0) timeAgo = `${minutesAgo}m ago`;
+      else timeAgo = 'just now';
+      
       // Determine status
       let status;
-      if (!isClosed && minutesAgo < 5) {
-        status = 'active'; // Active if connected in last 5 minutes and not closed
-      } else if (!isClosed && minutesAgo < 60) {
-        status = 'recent'; // Recent if in last hour but not super active
-      } else {
-        status = 'closed'; // Everything else is closed
-      }
-
+      if (!isClosed && minutesAgo < 5) status = 'active';
+      else if (!isClosed && minutesAgo < 60) status = 'recent';
+      else status = 'closed';
+      
       sessionsMap.set(sessionId, {
         id: sessionId,
         sessionId: sessionId,
@@ -397,30 +404,32 @@ app.get('/api/sessions/live', async (req, res) => {
         duration: duration,
         commands: commands,
         risk: risk,
-        timestamp: source['@timestamp'],
+        timestamp: firstEvent.timestamp,
         timeAgo: timeAgo,
-        status: status, // 'active', 'recent', or 'closed'
+        status: status,
         isClosed: isClosed
       });
     }
 
+    // ✅ Sort sessions by timestamp (newest first)
     const sessions = Array.from(sessionsMap.values())
-      .sort((a, b) => {
-        // Sort by: active first, then by risk, then by timestamp
-        if (a.status === 'active' && b.status !== 'active') return -1;
-        if (b.status === 'active' && a.status !== 'active') return 1;
-        if (a.risk !== b.risk) return b.risk - a.risk;
-        return new Date(b.timestamp) - new Date(a.timestamp);
-      });
+      .sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
     
-    console.log(`✅ Returning ${sessions.length} sessions`);
+    console.log(`✅ [SESSIONS] Returning ${sessions.length} sessions`);
     console.log(`   - Active: ${sessions.filter(s => s.status === 'active').length}`);
     console.log(`   - Recent: ${sessions.filter(s => s.status === 'recent').length}`);
     console.log(`   - Closed: ${sessions.filter(s => s.status === 'closed').length}`);
+    if (sessions.length > 0) {
+      console.log(`   - Newest: ${sessions[0].timeAgo}`);
+      console.log(`   - Oldest: ${sessions[sessions.length - 1].timeAgo}`);
+    }
+    console.log('');
     
     res.json(sessions);
+
   } catch (error) {
-    console.error('❌ Error fetching sessions:', error.message);
+    console.error('❌ [SESSIONS] Error:', error.message);
+    console.error(error.stack);
     res.status(500).json({ 
       error: 'Failed to fetch sessions',
       details: error.message 
@@ -428,9 +437,7 @@ app.get('/api/sessions/live', async (req, res) => {
   }
 });
 
-// ============================================
-// UPDATED: Get Session Commands for Replay (LiveAttackFeed Compatible)
-// ============================================
+// Get Session Commands
 app.get('/api/sessions/:sessionId/commands', async (req, res) => {
   try {
     const { sessionId } = req.params;
@@ -438,7 +445,7 @@ app.get('/api/sessions/:sessionId/commands', async (req, res) => {
 
     const response = await esClient.search({
       index: process.env.ELASTICSEARCH_INDEX || 'cowrie-*',
-      size: 1000,
+      size: 10000,
       body: {
         query: {
           bool: {
@@ -474,7 +481,7 @@ app.get('/api/sessions/:sessionId/commands', async (req, res) => {
   }
 });
 
-// Get Session Details (for View Details drawer)
+// Get Session Details
 app.get('/api/sessions/:sessionId/details', async (req, res) => {
   try {
     const { sessionId } = req.params;
@@ -500,7 +507,6 @@ app.get('/api/sessions/:sessionId/details', async (req, res) => {
     const ip = firstEvent.src_ip || firstEvent.source_ip || 'unknown';
     const geoData = getCountryFromIP(ip);
 
-    // Extract commands
     const commands = events
       .filter(e => e.eventid === 'cowrie.command.input')
       .map((e, i) => ({
@@ -510,7 +516,6 @@ app.get('/api/sessions/:sessionId/details', async (req, res) => {
         output: e.output || ''
       }));
 
-    // Extract network activity
     const networkActivity = {
       connectionTime: firstEvent['@timestamp'],
       sourceIP: ip,
@@ -522,7 +527,6 @@ app.get('/api/sessions/:sessionId/details', async (req, res) => {
       bytesSent: Math.floor(Math.random() * 5000) + 500
     };
 
-    // Extract fingerprint
     const clientEvent = events.find(e => e.eventid === 'cowrie.client.version');
     const fingerprint = {
       sshClient: clientEvent?.version || 'Unknown SSH Client',
@@ -531,7 +535,6 @@ app.get('/api/sessions/:sessionId/details', async (req, res) => {
       terminalSize: events.find(e => e.eventid === 'cowrie.client.size')?.size || '80x24'
     };
 
-    // Behavioral analysis
     const behaviorProfile = {
       commandCount: commands.length,
       sessionDuration: Math.floor((new Date() - new Date(firstEvent['@timestamp'])) / 1000),
@@ -557,7 +560,7 @@ app.get('/api/sessions/:sessionId/details', async (req, res) => {
   }
 });
 
-// System Info Endpoint
+// System Info
 app.get('/api/system/info', async (req, res) => {
   try {
     const os = await import('os');
@@ -566,7 +569,6 @@ app.get('/api/system/info', async (req, res) => {
     const freeMem = os.freemem();
     const usedMem = totalMem - freeMem;
     
-    // Get ES stats
     let esStats = { docs: 0 };
     try {
       const stats = await esClient.indices.stats({
@@ -577,7 +579,6 @@ app.get('/api/system/info', async (req, res) => {
       console.error('Failed to get ES stats:', err.message);
     }
     
-    // Get unique IPs
     let uniqueIPs = 0;
     try {
       const ipAgg = await esClient.search({
@@ -660,7 +661,7 @@ function formatUptime(seconds) {
   return parts.join(' ') || '< 1m';
 }
 
-// Restart Services Endpoint
+// Restart Services
 app.post('/api/services/restart', async (req, res) => {
   try {
     console.log('🔄 Service restart requested...');
@@ -690,9 +691,20 @@ app.post('/api/services/restart', async (req, res) => {
   }
 });
 
-// Get Analytics Timeline
+// Analytics Timeline
 app.get('/api/analytics/timeline', async (req, res) => {
   try {
+    const range = req.query.range || 'now-24h';
+    
+    let interval = '1h';
+    if (range === 'now-7d') {
+      interval = '6h';
+    } else if (range === 'now-30d') {
+      interval = '1d';
+    }
+    
+    console.log(`\n📊 [TIMELINE] Fetching range: ${range}, interval: ${interval}`);
+    
     const response = await esClient.search({
       index: process.env.ELASTICSEARCH_INDEX || 'cowrie-*',
       size: 0,
@@ -700,7 +712,7 @@ app.get('/api/analytics/timeline', async (req, res) => {
         query: {
           range: {
             '@timestamp': {
-              gte: 'now-24h'
+              gte: range
             }
           }
         },
@@ -708,7 +720,12 @@ app.get('/api/analytics/timeline', async (req, res) => {
           attacks_over_time: {
             date_histogram: {
               field: '@timestamp',
-              fixed_interval: '1h'
+              fixed_interval: interval,
+              min_doc_count: 0,
+              extended_bounds: {
+                min: range,
+                max: 'now'
+              }
             }
           }
         }
@@ -716,42 +733,105 @@ app.get('/api/analytics/timeline', async (req, res) => {
     });
 
     const buckets = response.aggregations?.attacks_over_time?.buckets || [];
-    const timeline = buckets.map(bucket => ({
-      time: new Date(bucket.key).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' }),
-      attacks: bucket.doc_count
-    }));
+    
+    const timeline = buckets.map(bucket => {
+      const date = new Date(bucket.key);
+      let timeLabel;
+      
+      if (interval === '1h') {
+        timeLabel = date.toLocaleTimeString('en-US', { 
+          hour: '2-digit', 
+          minute: '2-digit',
+          hour12: false 
+        });
+      } else if (interval === '6h') {
+        timeLabel = date.toLocaleDateString('en-US', { 
+          month: 'short', 
+          day: 'numeric' 
+        }) + ' ' + date.getHours() + ':00';
+      } else {
+        timeLabel = date.toLocaleDateString('en-US', { 
+          month: 'short', 
+          day: 'numeric' 
+        });
+      }
+      
+      return {
+        time: timeLabel,
+        attacks: bucket.doc_count
+      };
+    });
 
+    console.log(`✅ [TIMELINE] Returning ${timeline.length} data points`);
+    console.log(`   Total attacks: ${timeline.reduce((sum, t) => sum + t.attacks, 0)}`);
+    
     res.json(timeline);
   } catch (error) {
-    console.error('Error fetching timeline:', error);
+    console.error('❌ [TIMELINE] Error:', error);
     res.status(500).json({ error: 'Failed to fetch timeline data' });
   }
 });
 
-// Get Top Countries
+// Analytics Countries
 app.get('/api/analytics/countries', async (req, res) => {
   try {
-    const response = await esClient.search({
-      index: process.env.ELASTICSEARCH_INDEX || 'cowrie-*',
-      size: 0,
-      body: {
-        query: {
-          range: {
-            '@timestamp': {
-              gte: 'now-7d'
+    const range = req.query.range || 'now-7d';
+    
+    console.log(`\n🌍 [COUNTRIES] Fetching range: ${range}`);
+    
+    let response;
+    let field = 'src_ip';
+    
+    try {
+      response = await esClient.search({
+        index: process.env.ELASTICSEARCH_INDEX || 'cowrie-*',
+        size: 0,
+        body: {
+          query: {
+            range: {
+              '@timestamp': {
+                gte: range
+              }
             }
-          }
-        },
-        aggs: {
-          top_ips: {
-            terms: {
-              field: 'src_ip.keyword',
-              size: 100
+          },
+          aggs: {
+            top_ips: {
+              terms: {
+                field: 'src_ip',
+                size: 200
+              }
             }
           }
         }
-      }
-    });
+      });
+    } catch (err) {
+      console.log('   ⚠️ src_ip failed, trying src_ip.keyword...');
+      field = 'src_ip.keyword';
+      response = await esClient.search({
+        index: process.env.ELASTICSEARCH_INDEX || 'cowrie-*',
+        size: 0,
+        body: {
+          query: {
+            range: {
+              '@timestamp': {
+                gte: range
+              }
+            }
+          },
+          aggs: {
+            top_ips: {
+              terms: {
+                field: 'src_ip.keyword',
+                size: 200
+              }
+            }
+          }
+        }
+      });
+    }
+
+    console.log(`   Using field: ${field}`);
+    console.log(`   Found ${response.aggregations?.top_ips?.buckets.length || 0} unique IPs`);
 
     const countryMap = new Map();
     let totalAttacks = 0;
@@ -783,12 +863,14 @@ app.get('/api/analytics/countries', async (req, res) => {
         percentage: totalAttacks > 0 ? Math.round((country.attacks / totalAttacks) * 100) : 0
       }))
       .sort((a, b) => b.attacks - a.attacks)
-      .slice(0, 10);
+      .slice(0, 20);
 
+    console.log(`✅ [COUNTRIES] Returning ${countries.length} countries, ${totalAttacks} total attacks`);
+    
     res.json(countries);
   } catch (error) {
-    console.error('Error fetching countries:', error);
-    res.status(500).json({ error: 'Failed to fetch country data' });
+    console.error('❌ [COUNTRIES] Error:', error.message);
+    res.status(500).json({ error: 'Failed to fetch country data', details: error.message });
   }
 });
 
@@ -960,7 +1042,138 @@ app.get('/api/analytics/behavioral', async (req, res) => {
   }
 });
 
-// Settings Endpoints
+// Analytics Stats
+app.get('/api/analytics/stats', async (req, res) => {
+  try {
+    const range = req.query.range || 'now-24h';
+    
+    console.log(`📊 [ANALYTICS STATS] Fetching for range: ${range}`);
+    
+    const totalResponse = await esClient.count({
+      index: process.env.ELASTICSEARCH_INDEX || 'cowrie-*',
+      body: {
+        query: {
+          range: {
+            '@timestamp': {
+              gte: range
+            }
+          }
+        }
+      }
+    });
+
+    const countriesResponse = await esClient.search({
+      index: process.env.ELASTICSEARCH_INDEX || 'cowrie-*',
+      size: 0,
+      body: {
+        query: {
+          range: {
+            '@timestamp': {
+              gte: range
+            }
+          }
+        },
+        aggs: {
+          unique_ips: {
+            cardinality: {
+              field: 'src_ip'
+            }
+          }
+        }
+      }
+    });
+
+    const uniqueIPs = countriesResponse.aggregations?.unique_ips?.value || 0;
+    const totalAttacks = totalResponse.count;
+
+    console.log(`✅ [ANALYTICS STATS] ${totalAttacks} attacks from ${uniqueIPs} unique IPs`);
+
+    res.json({
+      totalAttacks: totalAttacks,
+      uniqueIPs: uniqueIPs,
+      threatLevel: totalAttacks > 200 ? 'HIGH' : totalAttacks > 50 ? 'MEDIUM' : 'LOW'
+    });
+  } catch (error) {
+    console.error('❌ [ANALYTICS STATS] Error:', error);
+    res.status(500).json({ error: 'Failed to fetch analytics statistics' });
+  }
+});
+
+// Attack Distribution
+app.get('/api/analytics/distribution', async (req, res) => {
+  try {
+    const range = req.query.range || 'now-7d';
+    
+    console.log(`📊 [DISTRIBUTION] Fetching for range: ${range}`);
+    
+    const response = await esClient.search({
+      index: process.env.ELASTICSEARCH_INDEX || 'cowrie-*',
+      size: 0,
+      body: {
+        query: {
+          range: {
+            '@timestamp': {
+              gte: range
+            }
+          }
+        },
+        aggs: {
+          attack_types: {
+            terms: {
+              field: 'eventid',
+              size: 20
+            }
+          }
+        }
+      }
+    });
+
+    const buckets = response.aggregations?.attack_types?.buckets || [];
+    
+    const eventMapping = {
+      'cowrie.login.failed': { name: 'Failed Login Attempts', color: '#FF6B35' },
+      'cowrie.login.success': { name: 'Successful Logins', color: '#DC2626' },
+      'cowrie.command.input': { name: 'Command Execution', color: '#8B5CF6' },
+      'cowrie.command.failed': { name: 'Failed Commands', color: '#F59E0B' },
+      'cowrie.session.connect': { name: 'Connection Attempts', color: '#00D9FF' },
+      'cowrie.session.closed': { name: 'Session Closures', color: '#6B7280' },
+      'cowrie.client.version': { name: 'Client Fingerprinting', color: '#FFA500' },
+      'cowrie.client.size': { name: 'Terminal Resize', color: '#10B981' },
+      'cowrie.direct-tcpip.request': { name: 'Port Forwarding', color: '#EC4899' },
+      'cowrie.session.file_download': { name: 'Malware Downloads', color: '#EF4444' },
+      'cowrie.log.closed': { name: 'Log Events', color: '#64748B' },
+      'cowrie.client.kex': { name: 'Key Exchange', color: '#06B6D4' } 
+    };
+
+    const distribution = buckets.map(bucket => {
+      const eventId = bucket.key;
+      const mapping = eventMapping[eventId] || { 
+        name: eventId.replace('cowrie.', ''), 
+        color: '#94A3B8' 
+      };
+      
+      return {
+        name: mapping.name,
+        value: bucket.doc_count,
+        color: mapping.color,
+        eventId: eventId
+      };
+    });
+
+    const topDistribution = distribution
+      .sort((a, b) => b.value - a.value)
+      .slice(0, 5);
+
+    console.log(`✅ [DISTRIBUTION] Returning ${topDistribution.length} attack types`);
+    
+    res.json(topDistribution);
+  } catch (error) {
+    console.error('❌ [DISTRIBUTION] Error:', error);
+    res.status(500).json({ error: 'Failed to fetch attack distribution' });
+  }
+});
+
+// Settings
 app.get('/api/settings', async (req, res) => {
   try {
     res.json({
@@ -1015,7 +1228,7 @@ app.delete('/api/data/clear', async (req, res) => {
   }
 });
 
-// NEW ENDPOINTS - Credentials Table
+// Credentials Table
 app.get('/api/credentials/table', async (req, res) => {
   try {
     const response = await esClient.search({
@@ -1086,6 +1299,189 @@ app.get('/api/credentials/table', async (req, res) => {
   }
 });
 
+// Debug Endpoints
+app.get('/api/debug/events', async (req, res) => {
+  try {
+    console.log('🔍 Checking what events exist in Elasticsearch...');
+    
+    const eventsResponse = await esClient.search({
+      index: process.env.ELASTICSEARCH_INDEX || 'cowrie-*',
+      size: 0,
+      body: {
+        aggs: {
+          event_types: {
+            terms: {
+              field: 'eventid.keyword',
+              size: 50
+            }
+          }
+        }
+      }
+    });
+
+    const eventTypes = eventsResponse.aggregations?.event_types?.buckets.map(b => ({
+      eventType: b.key,
+      count: b.doc_count
+    })) || [];
+
+    console.log('📊 Event types found:', eventTypes);
+
+    const sampleResponse = await esClient.search({
+      index: process.env.ELASTICSEARCH_INDEX || 'cowrie-*',
+      size: 5,
+      sort: [{ '@timestamp': { order: 'desc' } }]
+    });
+
+    const samples = sampleResponse.hits.hits.map(hit => ({
+      eventid: hit._source.eventid,
+      timestamp: hit._source['@timestamp'],
+      session: hit._source.session,
+      src_ip: hit._source.src_ip,
+      sample: hit._source
+    }));
+
+    console.log('📄 Sample documents:', samples.length);
+
+    const sessionFieldsResponse = await esClient.search({
+      index: process.env.ELASTICSEARCH_INDEX || 'cowrie-*',
+      size: 1,
+      body: {
+        query: {
+          exists: {
+            field: 'session'
+          }
+        }
+      }
+    });
+
+    const hasSessionField = sessionFieldsResponse.hits.total.value > 0;
+    console.log('✅ Has session field:', hasSessionField);
+
+    const totalResponse = await esClient.count({
+      index: process.env.ELASTICSEARCH_INDEX || 'cowrie-*'
+    });
+
+    const response = {
+      totalDocuments: totalResponse.count,
+      eventTypes: eventTypes,
+      hasSessionField: hasSessionField,
+      sampleDocuments: samples,
+      indexPattern: process.env.ELASTICSEARCH_INDEX || 'cowrie-*',
+      timestamp: new Date().toISOString()
+    };
+
+    console.log('✅ Debug info collected');
+    res.json(response);
+
+  } catch (error) {
+    console.error('❌ Error in debug endpoint:', error);
+    res.status(500).json({
+      error: 'Failed to fetch debug info',
+      message: error.message
+    });
+  }
+});
+
+app.get('/api/debug/data', async (req, res) => {
+  try {
+    console.log('\n🔍 CHECKING ELASTICSEARCH DATA...\n');
+    
+    const total = await esClient.count({
+      index: process.env.ELASTICSEARCH_INDEX || 'cowrie-*'
+    });
+    
+    const last7d = await esClient.count({
+      index: process.env.ELASTICSEARCH_INDEX || 'cowrie-*',
+      body: {
+        query: {
+          range: {
+            '@timestamp': { gte: 'now-7d' }
+          }
+        }
+      }
+    });
+    
+    const last30d = await esClient.count({
+      index: process.env.ELASTICSEARCH_INDEX || 'cowrie-*',
+      body: {
+        query: {
+          range: {
+            '@timestamp': { gte: 'now-30d' }
+          }
+        }
+      }
+    });
+    
+    const dateRange = await esClient.search({
+      index: process.env.ELASTICSEARCH_INDEX || 'cowrie-*',
+      size: 0,
+      body: {
+        aggs: {
+          oldest: { min: { field: '@timestamp' } },
+          newest: { max: { field: '@timestamp' } }
+        }
+      }
+    });
+    
+    const result = {
+      total: total.count,
+      last7Days: last7d.count,
+      last30Days: last30d.count,
+      oldest: dateRange.aggregations?.oldest?.value_as_string || 'N/A',
+      newest: dateRange.aggregations?.newest?.value_as_string || 'N/A'
+    };
+    
+    console.log('📊 Results:', result);
+    res.json(result);
+    
+  } catch (error) {
+    console.error('❌ Error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.get('/api/debug/sample', async (req, res) => {
+  try {
+    const sample = await esClient.search({
+      index: process.env.ELASTICSEARCH_INDEX || 'cowrie-*',
+      size: 1,
+      sort: [{ '@timestamp': { order: 'desc' } }]
+    });
+    
+    if (sample.hits.hits.length > 0) {
+      const doc = sample.hits.hits[0]._source;
+      res.json({
+        allFields: Object.keys(doc),
+        fullDocument: doc
+      });
+    } else {
+      res.json({ error: 'No documents found' });
+    }
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.get('/api/debug/eventids', async (req, res) => {
+  try {
+    const sample = await esClient.search({
+      index: process.env.ELASTICSEARCH_INDEX || 'cowrie-*',
+      size: 5,
+      sort: [{ '@timestamp': { order: 'desc' } }]
+    });
+    
+    const events = sample.hits.hits.map(hit => ({
+      eventid: hit._source.eventid,
+      timestamp: hit._source['@timestamp'],
+      allFields: Object.keys(hit._source)
+    }));
+    
+    res.json(events);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // WebSocket connection handling
 io.on('connection', (socket) => {
   console.log('🔌 Client connected:', socket.id);
@@ -1123,18 +1519,201 @@ io.on('connection', (socket) => {
     clearInterval(interval);
   });
 });
+// ============================================
+// REAL-TIME SESSION MONITORING
+// ============================================
+
+let lastCheckedTimestamp = new Date();
+
+// Monitor for new sessions every 2 seconds
+async function broadcastNewSessions() {
+  try {
+    const now = new Date();
+    
+    // Get events since last check
+    const newEvents = await esClient.search({
+      index: process.env.ELASTICSEARCH_INDEX || 'cowrie-*',
+      size: 100,
+      body: {
+        query: {
+          range: {
+            '@timestamp': {
+              gte: lastCheckedTimestamp.toISOString(),
+              lte: now.toISOString()
+            }
+          }
+        },
+        sort: [{ '@timestamp': { order: 'asc' } }]
+      }
+    });
+
+    if (newEvents.hits.hits.length > 0) {
+      console.log(`🔴 [LIVE] Found ${newEvents.hits.hits.length} new events`);
+      
+      // Group by session
+      const sessionEventsMap = new Map();
+      
+      newEvents.hits.hits.forEach(hit => {
+        const source = hit._source;
+        const sessionId = source.session;
+        
+        if (!sessionId) return;
+        
+        if (!sessionEventsMap.has(sessionId)) {
+          sessionEventsMap.set(sessionId, []);
+        }
+        
+        sessionEventsMap.get(sessionId).push({
+          timestamp: source['@timestamp'],
+          eventid: source.eventid,
+          src_ip: source.src_ip || source.source_ip,
+          input: source.input,
+          message: source.message
+        });
+      });
+
+      // Broadcast each session
+      for (const [sessionId, events] of sessionEventsMap.entries()) {
+        events.sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
+        
+        const firstEvent = events[0];
+        const ip = firstEvent.src_ip || 'unknown';
+        const geoData = getCountryFromIP(ip);
+        
+        const commands = events.filter(e => e.eventid === 'cowrie.command.input').length;
+        const isClosed = events.some(e => e.eventid === 'cowrie.session.closed');
+        
+        let risk = 3;
+        if (commands > 20) risk = 10;
+        else if (commands > 10) risk = 9;
+        else if (commands > 5) risk = 7;
+        else if (commands > 2) risk = 5;
+
+        const sessionData = {
+          id: sessionId,
+          sessionId: sessionId,
+          ip: ip,
+          country: geoData.flag,
+          countryName: geoData.country,
+          duration: 0,
+          commands: commands,
+          risk: risk,
+          timestamp: firstEvent.timestamp,
+          timeAgo: 'just now',
+          status: isClosed ? 'closed' : 'active',
+          isClosed: isClosed,
+          isNew: true // ✅ Mark as new for frontend highlighting
+        };
+
+        // Broadcast to all connected clients
+        io.emit('new_session', sessionData);
+        
+        console.log(`📡 [BROADCAST] New session: ${ip} (${geoData.country}) - Risk: ${risk}/10`);
+
+        // ✅ Send notification for high-risk sessions
+        if (risk >= 7 && notificationService) {
+          const alert = {
+            type: 'session',
+            severity: risk >= 9 ? 'critical' : 'high',
+            title: `🚨 ${risk >= 9 ? 'CRITICAL' : 'HIGH RISK'} Attack Detected!`,
+            message: `New SSH attack from ${ip} (${geoData.country}) - Risk: ${risk}/10`,
+            session: sessionData,
+            timestamp: new Date().toISOString()
+          };
+
+          // Send notifications
+          await notificationService.sendNotification(alert);
+        }
+      }
+    }
+
+    lastCheckedTimestamp = now;
+
+  } catch (error) {
+    console.error('❌ [LIVE] Error broadcasting sessions:', error.message);
+  }
+}
+
+// Start real-time monitoring
+setInterval(broadcastNewSessions, 2000); // Check every 2 seconds
+console.log('🔴 Real-time session monitoring started (2s interval)');
 
 // Start server
 const PORT = process.env.PORT || 5001;
 
 const startServer = async () => {
   try {
+    await connectDB();
+    
     console.log('🔍 Testing Elasticsearch connection...');
     const health = await esClient.cluster.health();
     console.log(`✅ Elasticsearch connected: ${health.cluster_name}`);
+    console.log('🔄 Starting session monitor...');
+    monitorSessions();
+    console.log('🔴 Starting real-time attack monitoring...');
+    setInterval(broadcastNewSessions, 2000);
+    
     console.log('✅ All systems operational!\n');
     
-    // Start session monitor
+    // ============================================
+    // ✅ NEW: INITIALIZE NOTIFICATION SERVICE
+    // ============================================
+    console.log('🔔 Initializing notification services...');
+    
+    // Initialize Email
+    if (process.env.SMTP_USER && process.env.SMTP_PASSWORD) {
+      const emailSuccess = notificationService.initializeEmail({
+        smtpHost: process.env.SMTP_HOST || 'smtp.gmail.com',
+        smtpPort: parseInt(process.env.SMTP_PORT || '587'),
+        smtpUser: process.env.SMTP_USER,
+        smtpPassword: process.env.SMTP_PASSWORD,
+        recipients: (process.env.EMAIL_RECIPIENTS || '').split(',').filter(Boolean)
+      });
+      
+      if (emailSuccess) {
+        console.log('✅ Email notifications enabled');
+      } else {
+        console.log('⚠️  Email notifications not configured');
+      }
+    } else {
+      console.log('ℹ️  Email credentials not found in .env');
+    }
+    
+    // Initialize Twilio (SMS & Phone)
+    if (process.env.TWILIO_ACCOUNT_SID && process.env.TWILIO_AUTH_TOKEN) {
+      const twilioSuccess = notificationService.initializeTwilio({
+        accountSid: process.env.TWILIO_ACCOUNT_SID,
+        authToken: process.env.TWILIO_AUTH_TOKEN,
+        phoneNumber: process.env.TWILIO_PHONE_NUMBER,
+        smsRecipients: (process.env.SMS_RECIPIENTS || '').split(',').filter(Boolean),
+        callRecipients: (process.env.CALL_RECIPIENTS || '').split(',').filter(Boolean)
+      });
+      
+      if (twilioSuccess) {
+        console.log('✅ Twilio (SMS & Phone) enabled');
+      } else {
+        console.log('⚠️  Twilio not configured');
+      }
+    } else {
+      console.log('ℹ️  Twilio credentials not found in .env');
+    }
+    
+    // Initialize Slack
+    if (process.env.SLACK_WEBHOOK_URL) {
+      const slackSuccess = notificationService.initializeSlack(process.env.SLACK_WEBHOOK_URL);
+      
+      if (slackSuccess) {
+        console.log('✅ Slack notifications enabled');
+      } else {
+        console.log('⚠️  Slack webhook invalid');
+      }
+    } else {
+      console.log('ℹ️  Slack webhook not found in .env');
+    }
+    
+    console.log('');
+    // ============================================
+    
     console.log('🔄 Starting session monitor...');
     monitorSessions();
   } catch (error) {
@@ -1151,7 +1730,7 @@ const startServer = async () => {
     console.log(`   GET  /api/dashboard/stats`);
     console.log(`   GET  /api/dashboard/attacks`);
     console.log(`   GET  /api/sessions/live`);
-    console.log(`   GET  /api/sessions/:id/commands  ✨ (Updated for LiveAttackFeed)`);
+    console.log(`   GET  /api/sessions/:id/commands`);
     console.log(`   GET  /api/sessions/:id/details`);
     console.log(`   GET  /api/credentials`);
     console.log(`   GET  /api/credentials/table`);
@@ -1160,6 +1739,14 @@ const startServer = async () => {
     console.log(`   GET  /api/analytics/behavioral`);
     console.log(`   GET  /api/system/info`);
     console.log(`   POST /api/services/restart`);
+    console.log('');
+    console.log('🔔 Notification Endpoints:');
+    console.log('   GET  /api/notifications/config');
+    console.log('   POST /api/notifications/config/email');
+    console.log('   POST /api/notifications/config/twilio');
+    console.log('   POST /api/notifications/config/slack');
+    console.log('   POST /api/notifications/test/:channel');
+    console.log('   POST /api/notifications/send');
     console.log(`\n✅ Server ready for connections!\n`);
   });
 };

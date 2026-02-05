@@ -1,11 +1,13 @@
 import { useState, useEffect } from "react";
 import { Play, Terminal, X, Pause } from "lucide-react";
+import { Socket } from 'socket.io-client';
 import axios from 'axios';
 
 const API_BASE = 'http://localhost:5001/api';
 
 interface AttackEntry {
   id: string;
+  session: string | null;
   ip: string;
   country: string;
   countryCode?: string;
@@ -17,6 +19,9 @@ interface AttackEntry {
   severity: string;
   details: string;
   command?: string;
+  commandCount?: number; // ✅ Track number of commands
+  firstSeen?: string;
+  lastSeen?: string;
 }
 
 const getRiskColor = (severity: string) => {
@@ -34,39 +39,126 @@ const getRiskColor = (severity: string) => {
   }
 };
 
-const getRiskLabel = (type: string) => {
-  return type;
-};
-
-export function LiveAttackFeed({ onNavigate }: { onNavigate?: (page: string) => void }) {
+export function LiveAttackFeed({ 
+  onNavigate,
+  socket 
+}: { 
+  onNavigate?: (page: string) => void;
+  socket?: Socket | null;
+}) {
   const [attacks, setAttacks] = useState<AttackEntry[]>([]);
   const [replayingAttack, setReplayingAttack] = useState<AttackEntry | null>(null);
+  const [liveIndicator, setLiveIndicator] = useState(false);
 
-  // Fetch attacks from API
+  // ✅ Listen for new sessions via WebSocket
+  useEffect(() => {
+    if (!socket) return;
+
+    socket.on('connect', () => {
+      console.log('✅ [LiveFeed] WebSocket connected');
+      setLiveIndicator(true);
+    });
+
+    socket.on('disconnect', () => {
+      console.log('⚠️ [LiveFeed] WebSocket disconnected');
+      setLiveIndicator(false);
+    });
+
+    // ✅ Add new session to feed
+    socket.on('new_session', (newSession: any) => {
+      console.log('🔴 [LiveFeed] New session detected:', newSession);
+      
+      const newAttack: AttackEntry = {
+        id: newSession.sessionId,
+        session: newSession.sessionId,
+        ip: newSession.ip,
+        country: newSession.countryName || 'Unknown',
+        flag: newSession.country,
+        timestamp: newSession.timestamp,
+        protocol: 'SSH',
+        status: 'Active',
+        type: newSession.risk >= 8 ? 'Critical Attack' : 
+              newSession.risk >= 6 ? 'High Risk' : 'Attack Detected',
+        severity: newSession.risk >= 8 ? 'critical' : 
+                  newSession.risk >= 6 ? 'high' : 
+                  newSession.risk >= 4 ? 'medium' : 'low',
+        details: `New attack from ${newSession.ip}`,
+        command: `Session started - ${newSession.commands} commands`,
+        commandCount: newSession.commands,
+        firstSeen: newSession.timestamp,
+        lastSeen: newSession.timestamp
+      };
+
+      // Add to top of feed
+      setAttacks(prev => [newAttack, ...prev.slice(0, 19)]);
+    });
+
+    return () => {
+      socket.off('new_session');
+    };
+  }, [socket]);
+
+  // ✅ Fetch and GROUP attacks by session
   const fetchAttacks = async () => {
     try {
       const response = await axios.get(`${API_BASE}/dashboard/attacks`);
-      const attacksData = response.data.slice(0, 20).map((attack: any) => ({
-        ...attack,
-        protocol: "SSH",
-        status: Math.random() > 0.5 ? "Active" : "Ended",
-        command: attack.details || attack.input || "No command recorded"
-      }));
-      setAttacks(attacksData);
+      const now = Date.now();
+
+      // ✅ Group by session ID
+      const sessionMap = new Map<string, AttackEntry>();
+
+      response.data.forEach((attack: any) => {
+        const sessionId = attack.session || attack.ip; // Fallback to IP if no session
+        
+        if (sessionMap.has(sessionId)) {
+          // Update existing session
+          const existing = sessionMap.get(sessionId)!;
+          existing.commandCount = (existing.commandCount || 0) + 1;
+          existing.lastSeen = attack.timestamp;
+          
+          // Update status based on time
+          const lastSeenTime = new Date(existing.lastSeen!).getTime();
+          const minutesAgo = (now - lastSeenTime) / (1000 * 60);
+          existing.status = minutesAgo < 5 ? "Active" : "Ended";
+        } else {
+          // Create new session entry
+          const attackTime = new Date(attack.timestamp).getTime();
+          const minutesAgo = (now - attackTime) / (1000 * 60);
+
+          sessionMap.set(sessionId, {
+            id: attack.id,
+            session: attack.session,
+            ip: attack.ip,
+            country: attack.country || 'Unknown',
+            flag: attack.flag,
+            timestamp: attack.timestamp,
+            protocol: "SSH",
+            status: minutesAgo < 5 ? "Active" : "Ended",
+            type: attack.type || 'Attack Detected',
+            severity: attack.severity || 'medium',
+            details: attack.details || `Attack from ${attack.ip}`,
+            command: attack.input || attack.details || "Session activity",
+            commandCount: 1,
+            firstSeen: attack.timestamp,
+            lastSeen: attack.timestamp
+          });
+        }
+      });
+
+      // Convert to array and sort by most recent
+      const groupedAttacks = Array.from(sessionMap.values())
+        .sort((a, b) => new Date(b.lastSeen!).getTime() - new Date(a.lastSeen!).getTime())
+        .slice(0, 20);
+
+      setAttacks(groupedAttacks);
     } catch (error) {
       console.error('Error fetching attacks:', error);
     }
   };
 
   useEffect(() => {
-    // Initial fetch
     fetchAttacks();
-
-    // Auto-refresh every 10 seconds
-    const interval = setInterval(() => {
-      fetchAttacks();
-    }, 10000);
-
+    const interval = setInterval(fetchAttacks, 10000);
     return () => clearInterval(interval);
   }, []);
 
@@ -79,8 +171,10 @@ export function LiveAttackFeed({ onNavigate }: { onNavigate?: (page: string) => 
         </div>
         <div className="flex items-center gap-3">
           <div className="flex items-center gap-2">
-            <div className="w-2 h-2 bg-[#10B981] rounded-full animate-pulse" />
-            <span className="text-gray-300 text-xs">Live</span>
+            <div className={`w-2 h-2 rounded-full ${liveIndicator ? 'bg-[#10B981] animate-pulse' : 'bg-gray-500'}`} />
+            <span className={`text-xs ${liveIndicator ? 'text-gray-300' : 'text-gray-500'}`}>
+              {liveIndicator ? 'Live' : 'Offline'}
+            </span>
           </div>
           <span className="text-gray-400 text-sm">Auto-refresh</span>
         </div>
@@ -121,8 +215,14 @@ export function LiveAttackFeed({ onNavigate }: { onNavigate?: (page: string) => 
                         borderColor: getRiskColor(attack.severity)
                       }}
                     >
-                      {getRiskLabel(attack.type)}
+                      {attack.type}
                     </span>
+                    {/* ✅ Show command count */}
+                    {attack.commandCount && attack.commandCount > 1 && (
+                      <span className="text-xs px-2 py-0.5 rounded bg-cyan-500/20 text-cyan-400 border border-cyan-500">
+                        {attack.commandCount} commands
+                      </span>
+                    )}
                   </div>
 
                   <div className="font-mono text-gray-300 text-sm mb-2 truncate">
@@ -131,21 +231,28 @@ export function LiveAttackFeed({ onNavigate }: { onNavigate?: (page: string) => 
 
                   <div className="flex items-center gap-3 text-xs text-gray-400">
                     <span>{new Date(attack.timestamp).toLocaleTimeString()}</span>
-                    <span
-                      className={
-                        attack.status === "Active"
-                          ? "text-[#10B981]"
-                          : "text-gray-400"
-                      }
-                    >
-                      {attack.status}
-                    </span>
+                    {attack.status === "Active" ? (
+                      <span className="flex items-center gap-1 text-[#10B981] font-semibold">
+                        <span className="w-1.5 h-1.5 bg-[#10B981] rounded-full animate-pulse"></span>
+                        Active
+                      </span>
+                    ) : (
+                      <span className="text-gray-500">Ended</span>
+                    )}
+                    {/* ✅ Show session duration */}
+                    {attack.firstSeen && attack.lastSeen && (
+                      <span className="text-gray-500">
+                        Duration: {Math.floor((new Date(attack.lastSeen).getTime() - new Date(attack.firstSeen).getTime()) / 1000)}s
+                      </span>
+                    )}
                   </div>
                 </div>
 
                 <button 
                   onClick={() => setReplayingAttack(attack)}
                   className="flex items-center gap-2 px-4 py-2 bg-cyan-500/20 text-cyan-400 rounded-lg hover:bg-cyan-500/30 transition-all text-sm border border-cyan-500 whitespace-nowrap"
+                  disabled={!attack.session} // ✅ Disable if no session
+                  title={attack.session ? "Replay all commands from this session" : "No session data available"}
                 >
                   <Play className="w-4 h-4" />
                   Replay
@@ -167,7 +274,18 @@ export function LiveAttackFeed({ onNavigate }: { onNavigate?: (page: string) => 
           </button>
         )}
         <button
-          onClick={() => {/* Export functionality */}}
+          onClick={() => {
+            const csv = attacks.map(a => 
+              `${a.ip},${a.country},${a.timestamp},${a.commandCount || 0},${a.severity}`
+            ).join('\n');
+            const blob = new Blob([`IP,Country,Timestamp,Commands,Severity\n${csv}`], { type: 'text/csv' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = `attack_feed_${new Date().toISOString()}.csv`;
+            a.click();
+            URL.revokeObjectURL(url);
+          }}
           className="px-4 py-3 bg-cyan-500/20 text-cyan-400 rounded-lg hover:bg-cyan-500/30 transition-all text-sm border border-cyan-500 font-medium"
         >
           Export Feed
@@ -182,49 +300,85 @@ export function LiveAttackFeed({ onNavigate }: { onNavigate?: (page: string) => 
   );
 }
 
+// ✅ Updated Replay Modal - Shows ALL commands from session
 function ReplayModal({ attack, onClose }: { attack: AttackEntry; onClose: () => void }) {
   const [commandIndex, setCommandIndex] = useState(0);
   const [isPlaying, setIsPlaying] = useState(true);
   const [speed, setSpeed] = useState(1);
   const [commands, setCommands] = useState<string[]>([]);
+  const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    // Fetch session commands from API
     const fetchCommands = async () => {
+      if (!attack.session) {
+        setCommands([
+          `$ ssh attacker@honeypot`,
+          `Connected to ${attack.ip}`,
+          attack.command || attack.details || 'No commands recorded',
+          "$ exit",
+          "Connection closed."
+        ]);
+        setLoading(false);
+        return;
+      }
+
       try {
-        const response = await axios.get(`${API_BASE}/sessions/${attack.id}/commands`);
+        console.log(`🎬 [Replay] Fetching commands for session: ${attack.session}`);
+        
+        // ✅ Try to get ALL commands - backend should return all, but we'll verify
+        const response = await axios.get(`${API_BASE}/sessions/${attack.session}/commands`);
         const sessionCommands = response.data.commands || [];
+        
+        console.log(`✅ [Replay] Received ${sessionCommands.length} commands from backend`);
+        console.log(`📊 [Replay] Expected ~${attack.commandCount || 'unknown'} commands`);
+        
+        // ✅ Warning if we got fewer commands than expected
+        if (attack.commandCount && sessionCommands.length < attack.commandCount) {
+          console.warn(`⚠️ [Replay] Expected ${attack.commandCount} commands but only got ${sessionCommands.length}`);
+          console.warn(`⚠️ [Replay] Backend may be limiting results. Check Elasticsearch 'size' parameter.`);
+        }
         
         if (sessionCommands.length > 0) {
           const formattedCommands = [
             `$ ssh attacker@honeypot`,
-            `Connected to ${attack.ip}`,
+            `Connected to ${attack.ip} (${attack.country})`,
             `Last login: ${new Date(attack.timestamp).toLocaleString()}`,
-            ...sessionCommands.map((cmd: any) => cmd.input),
+            `Session ID: ${attack.session}`,
+            attack.commandCount && sessionCommands.length < attack.commandCount 
+              ? `⚠️ Showing ${sessionCommands.length} of ${attack.commandCount} commands (backend limit)`
+              : `Total commands: ${sessionCommands.length}`,
+            ``,
+            ...sessionCommands.map((cmd: any, index: number) => {
+              const cmdText = cmd.input || cmd.command || 'unknown command';
+              return `[${index + 1}/${sessionCommands.length}] $ ${cmdText}`;
+            }),
+            ``,
             "$ exit",
             "Connection closed."
           ];
+          
+          console.log(`📜 [Replay] Displaying ${formattedCommands.length} lines`);
           setCommands(formattedCommands);
         } else {
-          // Fallback commands if no session data
           setCommands([
             `$ ssh attacker@honeypot`,
             `Connected to ${attack.ip}`,
-            attack.command || attack.details,
+            attack.command || attack.details || 'Session established',
             "$ exit",
             "Connection closed."
           ]);
         }
       } catch (error) {
         console.error('Error fetching commands:', error);
-        // Fallback commands
         setCommands([
           `$ ssh attacker@honeypot`,
           `Connected to ${attack.ip}`,
-          attack.command || attack.details,
-          "$ exit",
-          "Connection closed."
+          `Error loading session commands`,
+          attack.command || attack.details || 'Session data unavailable',
+          "$ exit"
         ]);
+      } finally {
+        setLoading(false);
       }
     };
 
@@ -232,14 +386,14 @@ function ReplayModal({ attack, onClose }: { attack: AttackEntry; onClose: () => 
   }, [attack]);
 
   useEffect(() => {
-    if (!isPlaying || commandIndex >= commands.length) return;
+    if (!isPlaying || commandIndex >= commands.length || loading) return;
 
     const timer = setTimeout(() => {
       setCommandIndex((prev) => Math.min(prev + 1, commands.length));
     }, 1000 / speed);
 
     return () => clearTimeout(timer);
-  }, [commandIndex, isPlaying, speed, commands.length]);
+  }, [commandIndex, isPlaying, speed, commands.length, loading]);
 
   return (
     <div
@@ -254,8 +408,12 @@ function ReplayModal({ attack, onClose }: { attack: AttackEntry; onClose: () => 
           <div className="flex items-center gap-3">
             <Terminal className="w-5 h-5 text-[#00D9FF]" />
             <div>
-              <h3 className="text-white font-bold">Attack Replay</h3>
-              <p className="text-gray-400 text-sm font-mono">{attack.ip} • {attack.country}</p>
+              <h3 className="text-white font-bold">Session Replay</h3>
+              <p className="text-gray-400 text-sm font-mono">
+                {attack.ip} • {attack.country}
+                {attack.session && <span className="text-[#00D9FF]"> • {attack.session}</span>}
+                {attack.commandCount && <span className="text-yellow-400"> • {attack.commandCount} commands</span>}
+              </p>
             </div>
           </div>
           <button
@@ -266,29 +424,35 @@ function ReplayModal({ attack, onClose }: { attack: AttackEntry; onClose: () => 
           </button>
         </div>
 
-        <div className="p-6 bg-black min-h-[400px] overflow-y-auto font-mono text-sm">
-          {commands.slice(0, commandIndex + 1).map((cmd, index) => (
-            <div
-              key={index}
-              className={`mb-2 ${
-                cmd.startsWith("$")
-                  ? "text-green-400"
-                  : cmd.includes("Password") || cmd.includes("login")
-                  ? "text-yellow-400"
-                  : cmd.includes("malicious") || cmd.includes("wget") || cmd.includes("curl")
-                  ? "text-red-400"
-                  : "text-gray-300"
-              }`}
-            >
-              {cmd}
+        <div className="p-6 bg-black min-h-[400px] max-h-[500px] overflow-y-auto font-mono text-sm">
+          {loading ? (
+            <div className="flex items-center justify-center py-12">
+              <div className="animate-spin rounded-full h-8 w-8 border-4 border-cyan-500 border-t-transparent"></div>
             </div>
-          ))}
-          {commandIndex < commands.length && (
-            <span
-              className="text-green-400 animate-pulse"
-            >
-              ▊
-            </span>
+          ) : (
+            <>
+              {commands.slice(0, commandIndex + 1).map((cmd, index) => (
+                <div
+                  key={index}
+                  className={`mb-2 ${
+                    cmd.startsWith("$")
+                      ? "text-green-400"
+                      : cmd.includes("Password") || cmd.includes("login") || cmd.includes("Session")
+                      ? "text-yellow-400"
+                      : cmd.includes("malicious") || cmd.includes("wget") || cmd.includes("curl") || cmd.includes("rm") || cmd.includes("chmod")
+                      ? "text-red-400"
+                      : cmd.includes("Error") || cmd.includes("closed")
+                      ? "text-gray-500"
+                      : "text-gray-300"
+                  }`}
+                >
+                  {cmd}
+                </div>
+              ))}
+              {commandIndex < commands.length && (
+                <span className="text-green-400 animate-pulse">▊</span>
+              )}
+            </>
           )}
         </div>
 
@@ -297,6 +461,7 @@ function ReplayModal({ attack, onClose }: { attack: AttackEntry; onClose: () => 
             <button
               onClick={() => setIsPlaying(!isPlaying)}
               className="p-2 bg-[#00D9FF] text-white rounded-lg hover:bg-[#00B8D9] transition-colors"
+              disabled={loading}
             >
               {isPlaying ? <Pause className="w-4 h-4" /> : <Play className="w-4 h-4" />}
             </button>
@@ -304,6 +469,7 @@ function ReplayModal({ attack, onClose }: { attack: AttackEntry; onClose: () => 
               value={speed}
               onChange={(e) => setSpeed(Number(e.target.value))}
               className="px-3 py-2 bg-gray-800 border border-gray-700 text-white rounded-lg text-sm"
+              disabled={loading}
             >
               <option value={0.5}>0.5x</option>
               <option value={1}>1x</option>
@@ -320,6 +486,7 @@ function ReplayModal({ attack, onClose }: { attack: AttackEntry; onClose: () => 
               setIsPlaying(true);
             }}
             className="px-4 py-2 bg-gray-800 text-white rounded-lg hover:bg-gray-700 transition-colors text-sm"
+            disabled={loading}
           >
             Restart
           </button>

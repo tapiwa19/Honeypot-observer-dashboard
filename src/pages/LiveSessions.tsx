@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
-import { Play, Pause, Shield, MapPin, Clock, X, Download, Circle } from 'lucide-react';
+import { io, Socket } from 'socket.io-client';
+import { Play, Pause, Shield, MapPin, Clock, X, Download, Circle, Activity } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import axios from 'axios';
 
@@ -8,6 +9,7 @@ interface Session {
   sessionId: string;
   ip: string;
   country: string;
+  countryName?: string;
   duration: number;
   commands: number;
   risk: number;
@@ -15,9 +17,11 @@ interface Session {
   timeAgo?: string;
   status?: 'active' | 'recent' | 'closed';
   isClosed?: boolean;
+  isNew?: boolean; // ✅ NEW: Mark new sessions
 }
 
 const API_BASE = 'http://localhost:5001/api';
+const SOCKET_URL = 'http://localhost:5001';
 
 export function LiveSessions() {
   const [sessions, setSessions] = useState<Session[]>([]);
@@ -25,50 +29,164 @@ export function LiveSessions() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [autoRefresh, setAutoRefresh] = useState(true);
+  
+  // ✅ NEW: WebSocket state
+  const [socket, setSocket] = useState<Socket | null>(null);
+  const [liveIndicator, setLiveIndicator] = useState(false);
+  const [newSessionAlert, setNewSessionAlert] = useState<Session | null>(null);
+  
   const [expandedSession, setExpandedSession] = useState<string | number | null>(null);
   const [severityFilter, setSeverityFilter] = useState<string>('all');
-  const [sortBy, setSortBy] = useState<string>('risk');
+  const [sortBy, setSortBy] = useState<string>('recent');
   const [selectedSessions, setSelectedSessions] = useState<Set<string | number>>(new Set());
   const [viewDetailsSession, setViewDetailsSession] = useState<string | null>(null);
   const [sessionCommands, setSessionCommands] = useState<any[]>([]);
   const [searchTerm, setSearchTerm] = useState('');
-  const [timeRange, setTimeRange] = useState<'1h' | '24h' | '7d' | 'all'>('1h');
+  const [timeRange, setTimeRange] = useState<'1h' | '24h' | '7d' | 'all'>('1h'); // Default to 1h
+
+  // ✅ NEW: Initialize WebSocket connection
+  useEffect(() => {
+    console.log('🔌 Initializing WebSocket connection...');
+    
+    const socketConnection = io(SOCKET_URL, {
+      transports: ['websocket', 'polling'],
+      reconnection: true,
+      reconnectionDelay: 1000,
+      reconnectionAttempts: 10
+    });
+
+    socketConnection.on('connect', () => {
+      console.log('✅ WebSocket connected');
+      setLiveIndicator(true);
+    });
+
+    socketConnection.on('disconnect', () => {
+      console.log('⚠️ WebSocket disconnected');
+      setLiveIndicator(false);
+    });
+
+    socketConnection.on('connect_error', (error) => {
+      console.error('❌ WebSocket connection error:', error);
+      setLiveIndicator(false);
+    });
+
+    // ✅ Listen for new sessions
+    socketConnection.on('new_session', (newSession: Session) => {
+      console.log('🔴 NEW SESSION DETECTED:', newSession);
+      
+      // Play notification sound
+      playNotificationSound();
+      
+      // Show alert banner
+      setNewSessionAlert(newSession);
+      setTimeout(() => setNewSessionAlert(null), 10000); // Hide after 10 seconds
+      
+      // Add to sessions list (at the top)
+      setSessions(prevSessions => {
+        // Check if session already exists
+        const existingIndex = prevSessions.findIndex(s => s.sessionId === newSession.sessionId);
+        
+        if (existingIndex >= 0) {
+          // Update existing session
+          const updated = [...prevSessions];
+          updated[existingIndex] = { ...newSession, isNew: true };
+          return updated;
+        } else {
+          // Add new session at the top
+          return [{ ...newSession, isNew: true }, ...prevSessions];
+        }
+      });
+      
+      // Show browser notification
+      showBrowserNotification(newSession);
+      
+      // Remove "isNew" flag after 30 seconds
+      setTimeout(() => {
+        setSessions(prev => prev.map(s => 
+          s.sessionId === newSession.sessionId ? { ...s, isNew: false } : s
+        ));
+      }, 30000);
+    });
+
+    setSocket(socketConnection);
+
+    // Cleanup on unmount
+    return () => {
+      console.log('🔌 Disconnecting WebSocket...');
+      socketConnection.disconnect();
+    };
+  }, []);
+
+  // ✅ Request notification permission on mount
+  useEffect(() => {
+    if ('Notification' in window && Notification.permission === 'default') {
+      Notification.requestPermission().then(permission => {
+        console.log('🔔 Notification permission:', permission);
+      });
+    }
+  }, []);
+
+  // ✅ NEW: Play sound on new attack
+  const playNotificationSound = () => {
+    try {
+      // Create a simple beep using Web Audio API
+      const audioContext = new (window.AudioContext || (window as any).webkitAudioContext)();
+      const oscillator = audioContext.createOscillator();
+      const gainNode = audioContext.createGain();
+      
+      oscillator.connect(gainNode);
+      gainNode.connect(audioContext.destination);
+      
+      oscillator.frequency.value = 800; // Frequency in Hz
+      oscillator.type = 'sine';
+      
+      gainNode.gain.setValueAtTime(0.3, audioContext.currentTime);
+      gainNode.gain.exponentialRampToValueAtTime(0.01, audioContext.currentTime + 0.5);
+      
+      oscillator.start(audioContext.currentTime);
+      oscillator.stop(audioContext.currentTime + 0.5);
+    } catch (error) {
+      console.error('Failed to play sound:', error);
+    }
+  };
+
+  // ✅ NEW: Show browser notification
+  const showBrowserNotification = (session: Session) => {
+    if ('Notification' in window && Notification.permission === 'granted') {
+      try {
+        const notification = new Notification('🚨 New Attack Detected!', {
+          body: `${session.ip} (${session.countryName || session.country}) - Risk: ${session.risk}/10`,
+          icon: '/favicon.ico',
+          tag: session.sessionId,
+          requireInteraction: false
+        });
+
+        notification.onclick = () => {
+          window.focus();
+          notification.close();
+        };
+
+        // Auto-close after 10 seconds
+        setTimeout(() => notification.close(), 10000);
+      } catch (error) {
+        console.error('Failed to show notification:', error);
+      }
+    }
+  };
 
   const fetchSessions = async () => {
     try {
       setLoading(true);
-      console.log('🔄 Fetching sessions from:', `${API_BASE}/sessions/live`);
-      const response = await axios.get(`${API_BASE}/sessions/live`);
-      console.log('✅ Received sessions:', response.data);
-      console.log('📊 Number of sessions:', response.data.length);
+      console.log('🔄 Fetching sessions with range:', timeRange);
       
-      // Filter based on selected time range
-      let filteredByTime = response.data;
-      const now = Date.now();
+      const response = await axios.get(`${API_BASE}/sessions/live`, {
+        params: { range: timeRange }
+      });
       
-      if (timeRange === '1h') {
-        const oneHourAgo = now - 3600000;
-        filteredByTime = response.data.filter((session: Session) => {
-          const sessionTime = new Date(session.timestamp).getTime();
-          return sessionTime >= oneHourAgo;
-        });
-      } else if (timeRange === '24h') {
-        const oneDayAgo = now - 86400000;
-        filteredByTime = response.data.filter((session: Session) => {
-          const sessionTime = new Date(session.timestamp).getTime();
-          return sessionTime >= oneDayAgo;
-        });
-      } else if (timeRange === '7d') {
-        const sevenDaysAgo = now - 604800000;
-        filteredByTime = response.data.filter((session: Session) => {
-          const sessionTime = new Date(session.timestamp).getTime();
-          return sessionTime >= sevenDaysAgo;
-        });
-      }
-      // 'all' shows everything
+      console.log('✅ Received sessions:', response.data.length);
       
-      console.log(`⏰ Sessions in ${timeRange} range:`, filteredByTime.length);
-      setSessions(filteredByTime);
+      // Set sessions (backend already filters by time)
+      setSessions(response.data);
       setError(null);
     } catch (err) {
       console.error('❌ Error fetching sessions:', err);
@@ -81,13 +199,11 @@ export function LiveSessions() {
   const fetchSessionCommands = async (sessionId: string) => {
     try {
       const response = await axios.get(`${API_BASE}/sessions/${sessionId}/commands`);
-      // Backend returns { session_id, commands: [{input, timestamp}], total }
-      // Transform to match our expected format
       const transformedCommands = response.data.commands.map((cmd: any, index: number) => ({
         id: index + 1,
         command: cmd.input,
         timestamp: cmd.timestamp,
-        output: '' // Backend doesn't provide output in this endpoint
+        output: ''
       }));
       setSessionCommands(transformedCommands);
     } catch (err) {
@@ -118,8 +234,15 @@ export function LiveSessions() {
       filtered = filtered.filter(s => s.risk >= 4 && s.risk < 6);
     }
 
-    // Sort
-    if (sortBy === 'risk') {
+    // ✅ Sort logic
+    if (sortBy === 'recent') {
+      // Keep newest first (already sorted by backend)
+      filtered.sort((a, b) => {
+        const timeA = new Date(a.timestamp).getTime();
+        const timeB = new Date(b.timestamp).getTime();
+        return timeB - timeA; // Newest first
+      });
+    } else if (sortBy === 'risk') {
       filtered.sort((a, b) => b.risk - a.risk);
     } else if (sortBy === 'duration') {
       filtered.sort((a, b) => b.duration - a.duration);
@@ -170,11 +293,12 @@ export function LiveSessions() {
     URL.revokeObjectURL(url);
   };
 
+  // Initial load and auto-refresh
   useEffect(() => {
     fetchSessions();
 
     if (autoRefresh) {
-      const interval = setInterval(fetchSessions, 300000); // 5 minutes
+      const interval = setInterval(fetchSessions, 10000); // Refresh every 10 seconds
       return () => clearInterval(interval);
     }
   }, [autoRefresh, timeRange]);
@@ -184,7 +308,7 @@ export function LiveSessions() {
     await fetchSessionCommands(sessionId);
   };
 
-  if (loading) {
+  if (loading && sessions.length === 0) {
     return (
       <div className="min-h-screen bg-gradient-to-br from-gray-900 via-gray-800 to-black flex items-center justify-center">
         <motion.div 
@@ -204,15 +328,74 @@ export function LiveSessions() {
   const uniqueIPs = new Set(sessions.map(s => s.ip)).size;
   const totalCommands = sessions.reduce((sum, s) => sum + s.commands, 0);
   const avgRisk = sessions.length > 0 ? (sessions.reduce((sum, s) => sum + s.risk, 0) / sessions.length).toFixed(1) : '0';
+  const activeSessions = sessions.filter(s => s.status === 'active').length;
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-gray-900 via-gray-800 to-black">
       <div className="p-6">
+        
+        {/* ✅ NEW: Live Attack Alert Banner */}
+        <AnimatePresence>
+          {newSessionAlert && (
+            <motion.div
+              initial={{ opacity: 0, y: -50 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -50 }}
+              className="fixed top-4 right-4 z-50 bg-gradient-to-r from-red-600 to-orange-600 text-white px-6 py-4 rounded-xl shadow-2xl border-2 border-red-400 max-w-md"
+            >
+              <div className="flex items-center gap-3">
+                <div className="w-3 h-3 bg-white rounded-full animate-pulse" />
+                <div className="flex-1">
+                  <div className="font-bold text-lg">🚨 NEW ATTACK DETECTED!</div>
+                  <div className="text-sm opacity-90 mt-1">
+                    {newSessionAlert.ip} ({newSessionAlert.countryName || newSessionAlert.country})
+                  </div>
+                  <div className="text-xs opacity-80 mt-1">
+                    Risk: {newSessionAlert.risk}/10 • {newSessionAlert.commands} commands
+                  </div>
+                </div>
+                <button 
+                  onClick={() => setNewSessionAlert(null)}
+                  className="text-white/80 hover:text-white transition-colors"
+                >
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+            </motion.div>
+          )}
+        </AnimatePresence>
+
         {/* Header */}
         <div className="flex items-center justify-between mb-6">
           <div>
-            <h1 className="text-3xl text-white mb-2">Live Attack Sessions</h1>
-            <p className="text-gray-400">Real-time monitoring of active SSH intrusions</p>
+            <h1 className="text-3xl text-white mb-2 flex items-center gap-3">
+              Live Attack Sessions
+              {/* ✅ Live Connection Indicator */}
+              {liveIndicator && (
+                <motion.span 
+                  initial={{ scale: 0.8, opacity: 0 }}
+                  animate={{ scale: 1, opacity: 1 }}
+                  className="flex items-center gap-2 text-sm bg-green-500/20 text-green-400 px-3 py-1 rounded-full border border-green-500"
+                >
+                  <div className="w-2 h-2 bg-green-400 rounded-full animate-pulse" />
+                  LIVE
+                </motion.span>
+              )}
+              {!liveIndicator && (
+                <span className="flex items-center gap-2 text-sm bg-gray-500/20 text-gray-400 px-3 py-1 rounded-full border border-gray-500">
+                  <div className="w-2 h-2 bg-gray-400 rounded-full" />
+                  OFFLINE
+                </span>
+              )}
+            </h1>
+            <p className="text-gray-400">
+              Real-time monitoring • Showing {
+                timeRange === '1h' ? 'Last Hour' : 
+                timeRange === '24h' ? 'Last 24 Hours' : 
+                timeRange === '7d' ? 'Last 7 Days' : 
+                'All Time'
+              }
+            </p>
           </div>
           
           <div className="flex items-center gap-3">
@@ -233,10 +416,10 @@ export function LiveSessions() {
         {/* Stats Cards */}
         <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-6">
           {[
-            { label: "Active Sessions", value: totalSessions.toString(), icon: Shield, color: "#00D9FF" },
+            { label: "Total Sessions", value: totalSessions.toString(), icon: Shield, color: "#00D9FF" },
+            { label: "Active Now", value: activeSessions.toString(), icon: Activity, color: "#10B981" },
             { label: "Unique IPs", value: uniqueIPs.toString(), icon: MapPin, color: "#8B5CF6" },
             { label: "Total Commands", value: totalCommands.toString(), icon: Circle, color: "#FF6B35" },
-            { label: "Avg Risk Score", value: avgRisk, icon: Clock, color: "#FFA500" },
           ].map((stat, index) => {
             const Icon = stat.icon;
             return (
@@ -246,7 +429,6 @@ export function LiveSessions() {
                 animate={{ opacity: 1, y: 0 }}
                 transition={{ delay: index * 0.05 }}
                 className="bg-gray-800/90 border border-gray-700 rounded-xl p-5 shadow-sm hover:shadow-lg transition-all"
-                style={{ '--hover-color': stat.color } as any}
               >
                 <Icon className="w-8 h-8 mb-3" style={{ color: stat.color }} />
                 <p className="text-gray-400 text-sm mb-1">{stat.label}</p>
@@ -257,7 +439,7 @@ export function LiveSessions() {
         </div>
 
         {/* Filter Bar */}
-        <div className="flex gap-3 mb-6 p-4 bg-gray-800/90 border border-gray-700 rounded-xl shadow-sm">
+        <div className="flex gap-3 mb-6 p-4 bg-gray-800/90 border border-gray-700 rounded-xl shadow-sm flex-wrap">
           <select 
             value={timeRange}
             onChange={(e) => setTimeRange(e.target.value as '1h' | '24h' | '7d' | 'all')}
@@ -265,7 +447,7 @@ export function LiveSessions() {
           >
             <option value="1h">Last Hour</option>
             <option value="24h">Last 24 Hours</option>
-            <option value="7d">Last 7 Days</option>
+             <option value="7d">Last 7 Days</option>
             <option value="all">All Time</option>
           </select>
 
@@ -285,6 +467,7 @@ export function LiveSessions() {
             onChange={(e) => setSortBy(e.target.value)}
             className="px-4 py-2 bg-gray-900 border border-gray-700 rounded-lg text-white text-sm focus:outline-none focus:border-[#00D9FF]"
           >
+            <option value="recent">Recent First ⏰</option>
             <option value="risk">Sort by Risk</option>
             <option value="duration">Sort by Duration</option>
             <option value="commands">Sort by Commands</option>
@@ -295,7 +478,7 @@ export function LiveSessions() {
             placeholder="Search IP, session ID, or country..."
             value={searchTerm}
             onChange={(e) => setSearchTerm(e.target.value)}
-            className="flex-1 px-4 py-2 bg-gray-900 border border-gray-700 rounded-lg text-white text-sm placeholder:text-gray-500 focus:outline-none focus:border-[#00D9FF]"
+            className="flex-1 min-w-[200px] px-4 py-2 bg-gray-900 border border-gray-700 rounded-lg text-white text-sm placeholder:text-gray-500 focus:outline-none focus:border-[#00D9FF]"
           />
 
           {selectedSessions.size > 0 && (
@@ -337,14 +520,18 @@ export function LiveSessions() {
         <div className="mb-6 bg-gray-800/90 border border-gray-700 rounded-xl p-4 shadow-sm">
           <div className="flex items-center justify-between flex-wrap gap-4">
             <div className="flex items-center gap-3">
-              <div className="w-3 h-3 bg-green-500 rounded-full animate-pulse"></div>
-              <span className="text-white font-medium">LIVE MONITORING</span>
+              <div className={`w-3 h-3 rounded-full ${liveIndicator ? 'bg-green-500 animate-pulse' : 'bg-gray-500'}`}></div>
+              <span className="text-white font-medium">
+                {liveIndicator ? 'LIVE MONITORING' : 'MONITORING OFFLINE'}
+              </span>
               <span className="text-gray-400">|</span>
-              <span className="text-[#00D9FF]">{filteredSessions.length} active session{filteredSessions.length !== 1 ? 's' : ''}</span>
+              <span className="text-[#00D9FF]">Showing {timeRange === '1h' ? 'Last Hour' : timeRange === '24h' ? 'Last 24h' : timeRange === '7d' ? 'Last 7 Days' : 'All Time'}</span>
+              <span className="text-gray-400">|</span>
+              <span className="text-yellow-400">{filteredSessions.length} session{filteredSessions.length !== 1 ? 's' : ''}</span>
               {selectedSessions.size > 0 && (
                 <>
                   <span className="text-gray-400">|</span>
-                  <span className="text-yellow-400">{selectedSessions.size} selected</span>
+                  <span className="text-green-400">{selectedSessions.size} selected</span>
                 </>
               )}
             </div>
@@ -364,15 +551,17 @@ export function LiveSessions() {
           >
             <div className="text-6xl mb-4">🕐</div>
             <h2 className="text-2xl font-bold text-white mb-2">
-              {searchTerm || severityFilter !== 'all' ? 'No Matching Sessions' : 'No Active Sessions'}
+              {searchTerm || severityFilter !== 'all' ? 'No Matching Sessions' : `No Sessions in ${timeRange === '1h' ? 'Last Hour' : timeRange === '24h' ? 'Last 24 Hours' : timeRange === '7d' ? 'Last 7 Days' : 'Database'}`}
             </h2>
-            <p className="text-gray-400">
+            <p className="text-gray-400 mb-4">
               {searchTerm || severityFilter !== 'all' 
                 ? 'Try adjusting your filters or search term' 
-                : 'Waiting for incoming SSH connections...'}
+                : liveIndicator 
+                ? `Waiting for attacks... WebSocket is ${liveIndicator ? 'connected' : 'disconnected'}`
+                : `No SSH sessions detected in the ${timeRange === '1h' ? 'last hour' : timeRange === '24h' ? 'last 24 hours' : timeRange === '7d' ? 'last 7 days' : 'database'}`}
             </p>
             
-            {sessions.length > 0 && (searchTerm || severityFilter !== 'all') && (
+            {(searchTerm || severityFilter !== 'all') && totalSessions > 0 && (
               <button
                 onClick={() => {
                   setSeverityFilter('all');
@@ -384,11 +573,20 @@ export function LiveSessions() {
               </button>
             )}
 
-            {totalSessions > 0 && !searchTerm && severityFilter === 'all' && (
+            {filteredSessions.length === 0 && sessions.length === 0 && timeRange !== 'all' && (
+              <button
+                onClick={() => setTimeRange('all')}
+                className="mt-4 px-6 py-2 bg-[#8B5CF6] text-white rounded-lg font-medium hover:bg-[#8B5CF6]/80 transition-all"
+              >
+                View All Time Data
+              </button>
+            )}
+
+            {totalSessions > 0 && (
               <div className="mt-8 p-4 bg-gray-900/50 rounded-lg inline-block">
-                <h3 className="text-white font-bold mb-2">Today's Statistics</h3>
+                <h3 className="text-white font-bold mb-2">Overall Statistics</h3>
                 <div className="text-gray-400 text-sm space-y-1">
-                  <div>Total Sessions: <span className="text-[#00D9FF] font-bold">{totalSessions}</span></div>
+                  <div>Total Sessions (All Time): <span className="text-[#00D9FF] font-bold">{totalSessions}</span></div>
                   <div>Total Commands: <span className="text-[#00D9FF] font-bold">{totalCommands}</span></div>
                   <div>Average Risk: <span className="text-[#00D9FF] font-bold">{avgRisk}/10</span></div>
                 </div>
@@ -498,10 +696,20 @@ function SessionCard({ session, expanded, selected, onToggle, onSelect, onViewDe
       className={`bg-gray-800/90 border rounded-xl overflow-hidden hover:shadow-lg transition-all ${
         selected 
           ? 'border-[#00D9FF] shadow-lg shadow-[#00D9FF]/20' 
+          : session.isNew
+          ? 'border-red-500 shadow-lg shadow-red-500/30 animate-pulse'
           : 'border-gray-700 hover:border-[#00D9FF]/50'
       }`}
     >
       <div className="p-5">
+        {/* ✅ NEW Attack Badge */}
+        {session.isNew && (
+          <div className="mb-3 bg-red-500/20 border border-red-500 rounded-lg px-3 py-2 flex items-center gap-2">
+            <div className="w-2 h-2 bg-red-500 rounded-full animate-pulse" />
+            <span className="text-red-400 text-xs font-bold">NEW ATTACK!</span>
+          </div>
+        )}
+
         {/* Header with checkbox */}
         <div className="flex items-start justify-between mb-4">
           <div className="flex items-start gap-3 flex-1">
@@ -589,10 +797,10 @@ function SessionCard({ session, expanded, selected, onToggle, onSelect, onViewDe
             <button
               onClick={onViewDetails}
               className="px-3 py-2 bg-red-600 text-white text-xs font-medium rounded-lg hover:bg-red-700 transition-all flex items-center justify-center gap-1"
-              title="View Session Recording"
+              title="View Session Commands"
             >
               <Circle className="w-3 h-3 fill-current" />
-              Rec
+              Commands
             </button>
           </div>
         </div>

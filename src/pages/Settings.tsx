@@ -1,4 +1,6 @@
-import { useState, useEffect } from 'react';
+import { UsersManagement } from '../components/UsersManagement';
+import { NotificationsTab } from '../components/NotificationsTab'; 
+import { useState, } from 'react';
 import { 
   Settings as SettingsIcon, 
   Bell, 
@@ -18,12 +20,11 @@ import {
   X,
   RotateCcw,
   Server,
-  Globe,
   Clock
 } from 'lucide-react';
 
 export default function Settings() {
-  const [activeTab, setActiveTab] = useState<'general' | 'cowrie' | 'alerts' | 'integrations' | 'backup'>('general');
+  const [activeTab, setActiveTab] = useState<'general' | 'users' | 'cowrie' | 'alerts' | 'notifications' | 'integrations' | 'backup'>('general');
   const [showToast, setShowToast] = useState(false);
   const [toastMessage, setToastMessage] = useState('');
   const [toastType, setToastType] = useState<'success' | 'error'>('success');
@@ -246,7 +247,7 @@ export default function Settings() {
       {/* Tabs */}
       <div className="bg-gray-800/90 rounded-xl shadow-lg border border-gray-700">
         <div className="border-b border-gray-700 px-6 py-3 flex gap-2 overflow-x-auto">
-          {(['general', 'cowrie', 'alerts', 'integrations', 'backup'] as const).map(tab => (
+         {(['general', 'users', 'cowrie', 'alerts', 'notifications', 'integrations', 'backup'] as const).map(tab => (
             <button
               key={tab}
               onClick={() => setActiveTab(tab)}
@@ -257,8 +258,10 @@ export default function Settings() {
               }`}
             >
               {tab === 'general' && <SettingsIcon className="w-4 h-4 inline mr-2" />}
+              {tab === 'users' && <User className="w-4 h-4 inline mr-2" />}
               {tab === 'cowrie' && <Server className="w-4 h-4 inline mr-2" />}
               {tab === 'alerts' && <Bell className="w-4 h-4 inline mr-2" />}
+              {tab === 'notifications' && <Bell className="w-4 h-4 inline mr-2" />}
               {tab === 'integrations' && <Database className="w-4 h-4 inline mr-2" />}
               {tab === 'backup' && <Download className="w-4 h-4 inline mr-2" />}
               {tab.charAt(0).toUpperCase() + tab.slice(1)}
@@ -359,7 +362,10 @@ export default function Settings() {
               </div>
             </div>
           )}
-
+          {/* Users Management Tab */}
+{activeTab === 'users' && (
+  <UsersManagement />
+)}
           {/* Cowrie Configuration Tab */}
           {activeTab === 'cowrie' && (
             <div className="space-y-6">
@@ -535,6 +541,11 @@ export default function Settings() {
               </div>
             </div>
           )}
+          {/* Notifications Tab */}
+           {activeTab === 'notifications' && (
+            <NotificationsTab />
+             )}
+
 
           {/* Integrations Tab */}
           {activeTab === 'integrations' && (
