@@ -28,7 +28,7 @@ export default function Settings() {
   const [showToast, setShowToast] = useState(false);
   const [toastMessage, setToastMessage] = useState('');
   const [toastType, setToastType] = useState<'success' | 'error'>('success');
-  const [isLoading, setIsLoading] = useState(false);
+
   
   // General Settings State
   const [honeypotIP, setHoneypotIP] = useState('192.168.56.101');

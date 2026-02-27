@@ -41,20 +41,18 @@ export default function DataExport() {
   const [toastMessage, setToastMessage] = useState('');
   const [toastType, setToastType] = useState<'success' | 'error' | 'warning'>('success');
   const [exportFormat, setExportFormat] = useState('csv');
-  const [dataTimeRange, setDataTimeRange] = useState('all-time');  // ✅ FIX: Changed from '24h' to 'all-time'
+  const [dataTimeRange, setDataTimeRange] = useState('all-time');
   const [isExporting, setIsExporting] = useState(false);
   
-  // ✅ NEW: Ref to track current time range for WebSocket
   const dataTimeRangeRef = useRef('all-time');
   
-  // ✅ FIX: Separate stats for display vs export
   const [stats, setStats] = useState({ 
     totalAttacks: 0, 
     totalCredentials: 0, 
     totalSessions: 0, 
     totalCountries: 0,
-    dataIntegrity: 100,  // ✅ 2026: Data integrity score
-    lastAudit: new Date()  // ✅ 2026: Last compliance audit
+    dataIntegrity: 100,
+    lastAudit: new Date()
   });
   
   const [realTimeData, setRealTimeData] = useState({ 
@@ -62,24 +60,18 @@ export default function DataExport() {
     sessionsToday: 0, 
     dataSize: 0, 
     lastUpdate: new Date(),
-    exportableRecords: 0  // ✅ FIX: Track actual exportable records
+    exportableRecords: 0
   });
   
   const [exportHistory, setExportHistory] = useState<ExportHistoryItem[]>([]);
-  const [_socket, setSocket] = useState<Socket | null>(null);  // Prefix with _ to indicate intentionally unused
+  const [_socket, setSocket] = useState<Socket | null>(null);
 
-  /**
-   * ✅ FIXED: Fetch REAL-TIME data from backend with proper counts
-   * Now accepts optional timeRange parameter to filter stats by selected range
-   */
   const fetchData = async (timeRange?: string) => {
     try {
       console.log('📊 [DATA EXPORT] Fetching real-time data...');
       
-      // ✅ Use provided timeRange or current dataTimeRange state
       const statsRange = timeRange || dataTimeRange;
       
-      // Map time ranges to Elasticsearch queries
       const timeRangeMap: Record<string, string> = {
         'today': 'now-1d',
         '24h': 'now-24h',
@@ -92,13 +84,12 @@ export default function DataExport() {
       
       console.log(`   📅 Time Range: ${statsRange} → ${range}`);
       
-      // ✅ FIX: Fetch data with selected time range
       const [
-        _dashboardStats,     // Unused but kept for future use
+        _dashboardStats,
         timelineData, 
-        allAttacksData,      // ✅ Now filtered by selected range
-        allCredentialsData,  // ✅ Now filtered by selected range
-        sessionsData,        // ✅ Now filtered by selected range
+        allAttacksData,
+        allCredentialsData,
+        sessionsData,
         countriesData
       ] = await Promise.all([
         axios.get(`${API_BASE}/dashboard/stats`),
@@ -106,17 +97,15 @@ export default function DataExport() {
         axios.get(`${API_BASE}/dashboard/attacks`, { params: { range, limit: 10000 } }),
         axios.get(`${API_BASE}/credentials/table`, { params: { range } }),
         axios.get(`${API_BASE}/sessions/live`, { params: { range } }),
-        axios.get(`${API_BASE}/analytics/countries`, { params: { range } })  // ✅ Backend IS fixed, should work
+        axios.get(`${API_BASE}/analytics/countries`, { params: { range } })
       ]);
       
-      // ✅ FIX: Calculate ACTUAL totals
       const totalAttacks = allAttacksData.data?.length || 0;
       const attacksToday = timelineData.data?.reduce((sum: number, d: any) => sum + d.attacks, 0) || 0;
       const credentialsCount = allCredentialsData.data?.length || 0;
       const sessionsCount = sessionsData.data?.length || 0;
       const countriesCount = countriesData.data?.length || 0;
       
-      // Sessions today (within last 24h)
       const now = Date.now();
       const last24h = now - (24 * 60 * 60 * 1000);
       const sessionsToday = sessionsData.data?.filter((s: any) => {
@@ -124,7 +113,6 @@ export default function DataExport() {
         return sessionTime > last24h;
       }).length || 0;
       
-      // ✅ 2026: Calculate data integrity score
       const dataIntegrity = calculateDataIntegrity(allAttacksData.data, sessionsData.data);
       
       setStats({
@@ -141,7 +129,7 @@ export default function DataExport() {
         sessionsToday,
         dataSize: calculateDataSize(totalAttacks, credentialsCount, sessionsCount),
         lastUpdate: new Date(),
-        exportableRecords: totalAttacks + credentialsCount + sessionsCount  // ✅ FIX: Total exportable
+        exportableRecords: totalAttacks + credentialsCount + sessionsCount
       });
       
       console.log(`✅ [DATA EXPORT] Loaded stats:`, {
@@ -159,34 +147,28 @@ export default function DataExport() {
   };
   
   /**
-   * ✅ 2026: Calculate data integrity score
+   * ✅ FIXED: Removed unused 'issues' variable; prefixed unused 'sessions' param with _
    */
-  const calculateDataIntegrity = (attacks: any[], sessions: any[]): number => {
+  const calculateDataIntegrity = (attacks: any[], _sessions: any[]): number => {
     if (!attacks || attacks.length === 0) return 100;
     
     let score = 100;
-    let issues = 0;
     
     // Check for missing sessions
     const sessionsWithAttacks = attacks.filter(a => a.session).length;
     if (sessionsWithAttacks / attacks.length < 0.9) {
-      issues++;
       score -= 10;
     }
     
     // Check for malformed data
     const validTimestamps = attacks.filter(a => a.timestamp && !isNaN(new Date(a.timestamp).getTime())).length;
     if (validTimestamps / attacks.length < 0.95) {
-      issues++;
       score -= 15;
     }
     
     return Math.max(score, 0);
   };
   
-  /**
-   * Calculate estimated data size
-   */
   const calculateDataSize = (attacks: number, credentials: number, sessions: number): number => {
     const attackSize = attacks * 512;
     const credentialSize = credentials * 256;
@@ -194,9 +176,6 @@ export default function DataExport() {
     return attackSize + credentialSize + sessionSize;
   };
   
-  /**
-   * Load export history from localStorage
-   */
   const loadExportHistory = () => {
     try {
       const stored = localStorage.getItem('export_history');
@@ -210,9 +189,6 @@ export default function DataExport() {
     }
   };
   
-  /**
-   * Save export to history
-   */
   const saveToHistory = (exportItem: ExportHistoryItem) => {
     try {
       const updatedHistory = [exportItem, ...exportHistory].slice(0, 20);
@@ -223,9 +199,6 @@ export default function DataExport() {
     }
   };
 
-  /**
-   * Initialize WebSocket for live updates
-   */
   useEffect(() => {
     console.log('🔌 [DATA EXPORT] Connecting to WebSocket...');
     
@@ -239,11 +212,11 @@ export default function DataExport() {
     });
 
     ws.on('new_attack', () => {
-      fetchData(dataTimeRangeRef.current);  // ✅ Use ref to get current value
+      fetchData(dataTimeRangeRef.current);
     });
 
     ws.on('new_session', () => {
-      fetchData(dataTimeRangeRef.current);  // ✅ Use ref to get current value
+      fetchData(dataTimeRangeRef.current);
     });
 
     setSocket(ws);
@@ -254,9 +227,6 @@ export default function DataExport() {
     };
   }, []);
 
-  /**
-   * Initial data fetch
-   */
   useEffect(() => {
     fetchData();
     loadExportHistory();
@@ -265,11 +235,8 @@ export default function DataExport() {
     return () => clearInterval(interval);
   }, []);
 
-  /**
-   * ✅ NEW: Refetch data when time range changes
-   */
   useEffect(() => {
-    dataTimeRangeRef.current = dataTimeRange;  // ✅ Keep ref in sync
+    dataTimeRangeRef.current = dataTimeRange;
     fetchData(dataTimeRange);
   }, [dataTimeRange]);
 
@@ -280,9 +247,6 @@ export default function DataExport() {
     setTimeout(() => setShowToast(false), 3000);
   };
 
-  /**
-   * ✅ REAL EXPORT with backend integration
-   */
   const handleExport = async (dataType: string, format: string) => {
     try {
       setIsExporting(true);
@@ -335,14 +299,13 @@ export default function DataExport() {
       
       let processedData = processDataForExport(rawData, dataType);
       
-      // ✅ 2026: Add compliance metadata
       const exportMetadata = {
         exportedAt: new Date().toISOString(),
         exportedBy: 'Honeypot Dashboard',
         timeRange: dataTimeRange,
         recordCount: processedData.length,
         dataIntegrityScore: stats.dataIntegrity,
-        compliance: ['GDPR', 'SOC 2', 'ISO 27001', 'NIST CSF 2.0'],  // ✅ 2026 standards
+        compliance: ['GDPR', 'SOC 2', 'ISO 27001', 'NIST CSF 2.0'],
         hashAlgorithm: 'SHA-256',
         version: '2.0.0'
       };
@@ -358,7 +321,6 @@ export default function DataExport() {
           fileExtension = 'csv';
           break;
         case 'json':
-          // ✅ 2026: Include metadata in JSON exports
           const jsonExport = {
             metadata: exportMetadata,
             data: processedData
@@ -383,7 +345,7 @@ export default function DataExport() {
       
       downloadFile(exportContent, filename, mimeType);
       
-      const hash = await generateSecureHash(exportContent);  // ✅ 2026: Proper SHA-256
+      const hash = await generateSecureHash(exportContent);
       const fileSize = new Blob([exportContent]).size;
       
       console.log(`✅ [EXPORT] Completed: ${filename} (${formatBytes(fileSize)})`);
@@ -403,7 +365,7 @@ export default function DataExport() {
         encrypted: false,
         hash: `sha256:${hash}`,
         records: processedData.length,
-        compliance: exportMetadata.compliance  // ✅ 2026: Track compliance
+        compliance: exportMetadata.compliance
       };
       
       saveToHistory(newExport);
@@ -416,9 +378,6 @@ export default function DataExport() {
     }
   };
 
-  /**
-   * Process raw backend data into clean export format
-   */
   const processDataForExport = (rawData: any, dataType: string): any[] => {
     if (!Array.isArray(rawData)) {
       return [rawData];
@@ -430,11 +389,10 @@ export default function DataExport() {
           timestamp: attack.timestamp,
           source_ip: attack.ip,
           country: attack.country,
-          attack_type: String(attack.type || 'unknown'),  // ✅ FIX: Ensure string
+          attack_type: String(attack.type || 'unknown'),
           severity: attack.severity,
-          details: String(attack.details || ''),  // ✅ FIX: Ensure string
+          details: String(attack.details || ''),
           session_id: attack.session || 'N/A',
-          // ✅ 2026: Additional forensic fields
           event_id: attack.id,
           protocol: 'SSH',
           geolocation: attack.flag || '🏴'
@@ -451,7 +409,6 @@ export default function DataExport() {
           countries: Array.isArray(cred.countries) ? cred.countries.join(', ') : 'N/A',
           first_seen: cred.firstSeen,
           last_seen: cred.lastSeen,
-          // ✅ 2026: Risk scoring
           risk_score: cred.success > 0 ? 'HIGH' : cred.attempts > 10 ? 'MEDIUM' : 'LOW'
         }));
         
@@ -466,7 +423,6 @@ export default function DataExport() {
           status: session.status,
           timestamp: session.timestamp,
           time_ago: session.timeAgo,
-          // ✅ 2026: Session forensics
           threat_level: session.risk >= 8 ? 'CRITICAL' : session.risk >= 6 ? 'HIGH' : 'MEDIUM'
         }));
         
@@ -477,7 +433,6 @@ export default function DataExport() {
           total_attacks: geo.attacks,
           percentage_of_total: geo.percentage,
           flag_emoji: geo.flag,
-          // ✅ 2026: Threat intelligence
           threat_density: geo.attacks > 100 ? 'HIGH' : geo.attacks > 50 ? 'MEDIUM' : 'LOW'
         }));
         
@@ -486,9 +441,6 @@ export default function DataExport() {
     }
   };
 
-  /**
-   * Convert data array to CSV format
-   */
   const convertToCSV = (data: any[]): string => {
     if (!data || data.length === 0) {
       return '';
@@ -511,13 +463,9 @@ export default function DataExport() {
     return csvRows.join('\n');
   };
 
-  /**
-   * ✅ 2026: Convert data array to XML format with metadata
-   */
   const convertToXML = (data: any[], rootName: string, metadata: any): string => {
     let xml = `<?xml version="1.0" encoding="UTF-8"?>\n<${rootName}_export>\n`;
     
-    // Add metadata
     xml += '  <metadata>\n';
     Object.entries(metadata).forEach(([key, value]) => {
       if (Array.isArray(value)) {
@@ -548,9 +496,6 @@ export default function DataExport() {
     return xml;
   };
 
-  /**
-   * Download file to user's computer
-   */
   const downloadFile = (content: string | Blob, filename: string, mimeType: string) => {
     const blob = content instanceof Blob 
       ? content 
@@ -566,9 +511,6 @@ export default function DataExport() {
     URL.revokeObjectURL(url);
   };
 
-  /**
-   * ✅ 2026: Generate proper SHA-256 hash
-   */
   const generateSecureHash = async (content: string): Promise<string> => {
     try {
       const encoder = new TextEncoder();
@@ -576,9 +518,8 @@ export default function DataExport() {
       const hashBuffer = await crypto.subtle.digest('SHA-256', data);
       const hashArray = Array.from(new Uint8Array(hashBuffer));
       const hashHex = hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
-      return hashHex.substring(0, 12);  // First 12 chars for display
+      return hashHex.substring(0, 12);
     } catch (error) {
-      // Fallback to simple hash
       let hash = 0;
       for (let i = 0; i < content.length; i++) {
         const char = content.charCodeAt(i);
@@ -589,9 +530,6 @@ export default function DataExport() {
     }
   };
 
-  /**
-   * Format bytes to human-readable size
-   */
   const formatBytes = (bytes: number): string => {
     if (bytes === 0) return '0 Bytes';
     const k = 1024;
@@ -600,9 +538,6 @@ export default function DataExport() {
     return Math.round((bytes / Math.pow(k, i)) * 100) / 100 + ' ' + sizes[i];
   };
 
-  /**
-   * Format time ago
-   */
   const formatTimeAgo = (dateString: string): string => {
     const seconds = Math.floor((Date.now() - new Date(dateString).getTime()) / 1000);
     if (seconds < 60) return 'Just now';
@@ -611,9 +546,6 @@ export default function DataExport() {
     return `${Math.floor(seconds / 86400)}d ago`;
   };
 
-  /**
-   * Dataset configurations - useMemo to update when stats change
-   */
   const datasets = useMemo(() => [
     {
       title: 'Complete Attack Dataset',
@@ -624,7 +556,7 @@ export default function DataExport() {
       icon: Database,
       color: 'from-[#FF6B35] to-[#8B5CF6]',
       id: 'attacks',
-      compliance: ['NIST CSF', 'MITRE ATT&CK']  // ✅ 2026
+      compliance: ['NIST CSF', 'MITRE ATT&CK']
     },
     {
       title: 'Credentials Dataset',
@@ -635,7 +567,7 @@ export default function DataExport() {
       icon: FileText,
       color: 'from-[#00D9FF] to-[#10B981]',
       id: 'credentials',
-      compliance: ['PCI DSS', 'GDPR']  // ✅ 2026
+      compliance: ['PCI DSS', 'GDPR']
     },
     {
       title: 'Session Logs',
@@ -646,7 +578,7 @@ export default function DataExport() {
       icon: Package,
       color: 'from-[#8B5CF6] to-[#00D9FF]',
       id: 'sessions',
-      compliance: ['SOC 2', 'ISO 27001']  // ✅ 2026
+      compliance: ['SOC 2', 'ISO 27001']
     },
     {
       title: 'Geographic Intelligence',
@@ -657,9 +589,9 @@ export default function DataExport() {
       icon: Calendar,
       color: 'from-[#10B981] to-[#00D9FF]',
       id: 'geographic',
-      compliance: ['Threat Intel Sharing']  // ✅ 2026
+      compliance: ['Threat Intel Sharing']
     },
-  ], [stats]);  // ✅ CRITICAL: Recalculate when stats change
+  ], [stats]);
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-gray-900 via-gray-800 to-black p-6">
@@ -689,7 +621,7 @@ export default function DataExport() {
         <p className="text-gray-400">Export honeypot data with 2026 cybersecurity standards compliance</p>
       </div>
 
-      {/* ✅ 2026: Compliance Badge */}
+      {/* Compliance Badge */}
       <div className="bg-gradient-to-r from-blue-900/30 to-purple-900/30 border border-blue-500/50 rounded-xl p-4 mb-6">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-3">
@@ -800,7 +732,6 @@ export default function DataExport() {
                   <div className="flex-1">
                     <h3 className="font-bold text-white">{dataset.title}</h3>
                     <p className="text-sm text-gray-400">{dataset.description}</p>
-                    {/* ✅ 2026: Compliance badges */}
                     <div className="flex gap-1 mt-1">
                       {dataset.compliance.map(c => (
                         <span key={c} className="text-xs px-2 py-0.5 bg-blue-500/20 text-blue-400 border border-blue-500/30 rounded">

@@ -1,4 +1,4 @@
-import React from 'react';
+
 import { Play, Pause, Shield, MapPin, Clock, X, Download, Circle } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 

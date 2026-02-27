@@ -5,8 +5,7 @@
 import { useState, useEffect } from 'react';
 import { 
   Mail, 
-  MessageSquare, 
-  Phone, 
+  MessageSquare,  
   Webhook,
   Check,
   X,
