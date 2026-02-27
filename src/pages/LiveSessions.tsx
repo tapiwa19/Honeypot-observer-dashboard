@@ -1,6 +1,6 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { io, Socket } from 'socket.io-client';
-import { Play, Pause, Shield, MapPin, Clock, X, Download, Circle, Activity } from 'lucide-react';
+import { Play, Pause, Shield, MapPin, Clock, X, Download, Circle, Activity  } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import axios from 'axios';
 
@@ -17,7 +17,13 @@ interface Session {
   timeAgo?: string;
   status?: 'active' | 'recent' | 'closed';
   isClosed?: boolean;
-  isNew?: boolean; // ✅ NEW: Mark new sessions
+  isNew?: boolean;
+}
+
+// ✅ NEW: Threat Intelligence Interface
+interface ThreatIntel {
+  topAttackers: { ip: string; count: number; country: string; flag: string }[];
+  commonCommands: { cmd: string; count: number }[];
 }
 
 const API_BASE = 'http://localhost:5001/api';
@@ -30,10 +36,19 @@ export function LiveSessions() {
   const [error, setError] = useState<string | null>(null);
   const [autoRefresh, setAutoRefresh] = useState(true);
   
-  // ✅ NEW: WebSocket state
+  // WebSocket state
   const [socket, setSocket] = useState<Socket | null>(null);
   const [liveIndicator, setLiveIndicator] = useState(false);
   const [newSessionAlert, setNewSessionAlert] = useState<Session | null>(null);
+  
+  // ✅ NEW: Threat Intelligence state
+  const [threatIntel, setThreatIntel] = useState<ThreatIntel>({
+    topAttackers: [],
+    commonCommands: []
+  });
+  
+  // ✅ NEW: Attack Replay state
+  const [replaySession, setReplaySession] = useState<{ sessionId: string; commands: any[] } | null>(null);
   
   const [expandedSession, setExpandedSession] = useState<string | number | null>(null);
   const [severityFilter, setSeverityFilter] = useState<string>('all');
@@ -42,9 +57,9 @@ export function LiveSessions() {
   const [viewDetailsSession, setViewDetailsSession] = useState<string | null>(null);
   const [sessionCommands, setSessionCommands] = useState<any[]>([]);
   const [searchTerm, setSearchTerm] = useState('');
-  const [timeRange, setTimeRange] = useState<'1h' | '24h' | '7d' | 'all'>('1h'); // Default to 1h
+  const [timeRange, setTimeRange] = useState<'1h' | '24h' | '7d' | 'all'>('1h');
 
-  // ✅ NEW: Initialize WebSocket connection
+  // ✅ IMPROVED: WebSocket connection with MORE events
   useEffect(() => {
     console.log('🔌 Initializing WebSocket connection...');
     
@@ -70,37 +85,28 @@ export function LiveSessions() {
       setLiveIndicator(false);
     });
 
-    // ✅ Listen for new sessions
+    // Listen for new sessions
     socketConnection.on('new_session', (newSession: Session) => {
       console.log('🔴 NEW SESSION DETECTED:', newSession);
       
-      // Play notification sound
       playNotificationSound();
-      
-      // Show alert banner
       setNewSessionAlert(newSession);
-      setTimeout(() => setNewSessionAlert(null), 10000); // Hide after 10 seconds
+      setTimeout(() => setNewSessionAlert(null), 10000);
       
-      // Add to sessions list (at the top)
       setSessions(prevSessions => {
-        // Check if session already exists
         const existingIndex = prevSessions.findIndex(s => s.sessionId === newSession.sessionId);
         
         if (existingIndex >= 0) {
-          // Update existing session
           const updated = [...prevSessions];
           updated[existingIndex] = { ...newSession, isNew: true };
           return updated;
         } else {
-          // Add new session at the top
           return [{ ...newSession, isNew: true }, ...prevSessions];
         }
       });
       
-      // Show browser notification
       showBrowserNotification(newSession);
       
-      // Remove "isNew" flag after 30 seconds
       setTimeout(() => {
         setSessions(prev => prev.map(s => 
           s.sessionId === newSession.sessionId ? { ...s, isNew: false } : s
@@ -108,16 +114,47 @@ export function LiveSessions() {
       }, 30000);
     });
 
+    // ✅ NEW: Listen for session updates (when attacker runs more commands)
+    socketConnection.on('session_updated', (updatedSession: any) => {
+      console.log('🔄 SESSION UPDATED:', updatedSession);
+      
+      setSessions(prevSessions => 
+        prevSessions.map(s => 
+          s.sessionId === updatedSession.sessionId 
+            ? { ...s, ...updatedSession, isNew: false } 
+            : s
+        )
+      );
+    });
+
+    // ✅ NEW: Listen for session closures
+    socketConnection.on('session_closed', (data: { sessionId: string }) => {
+      console.log('🔒 SESSION CLOSED:', data.sessionId);
+      
+      setSessions(prevSessions => 
+        prevSessions.map(s => 
+          s.sessionId === data.sessionId 
+            ? { ...s, status: 'closed', isClosed: true } 
+            : s
+        )
+      );
+    });
+
+    // ✅ NEW: Listen for threat intelligence updates
+    socketConnection.on('threat_intel_update', (intel: ThreatIntel) => {
+      console.log('📊 THREAT INTEL UPDATE:', intel);
+      setThreatIntel(intel);
+    });
+
     setSocket(socketConnection);
 
-    // Cleanup on unmount
     return () => {
       console.log('🔌 Disconnecting WebSocket...');
       socketConnection.disconnect();
     };
   }, []);
 
-  // ✅ Request notification permission on mount
+  // Request notification permission
   useEffect(() => {
     if ('Notification' in window && Notification.permission === 'default') {
       Notification.requestPermission().then(permission => {
@@ -126,10 +163,9 @@ export function LiveSessions() {
     }
   }, []);
 
-  // ✅ NEW: Play sound on new attack
+  // Play notification sound
   const playNotificationSound = () => {
     try {
-      // Create a simple beep using Web Audio API
       const audioContext = new (window.AudioContext || (window as any).webkitAudioContext)();
       const oscillator = audioContext.createOscillator();
       const gainNode = audioContext.createGain();
@@ -137,7 +173,7 @@ export function LiveSessions() {
       oscillator.connect(gainNode);
       gainNode.connect(audioContext.destination);
       
-      oscillator.frequency.value = 800; // Frequency in Hz
+      oscillator.frequency.value = 800;
       oscillator.type = 'sine';
       
       gainNode.gain.setValueAtTime(0.3, audioContext.currentTime);
@@ -150,7 +186,7 @@ export function LiveSessions() {
     }
   };
 
-  // ✅ NEW: Show browser notification
+  // Show browser notification
   const showBrowserNotification = (session: Session) => {
     if ('Notification' in window && Notification.permission === 'granted') {
       try {
@@ -166,7 +202,6 @@ export function LiveSessions() {
           notification.close();
         };
 
-        // Auto-close after 10 seconds
         setTimeout(() => notification.close(), 10000);
       } catch (error) {
         console.error('Failed to show notification:', error);
@@ -185,7 +220,6 @@ export function LiveSessions() {
       
       console.log('✅ Received sessions:', response.data.length);
       
-      // Set sessions (backend already filters by time)
       setSessions(response.data);
       setError(null);
     } catch (err) {
@@ -206,17 +240,24 @@ export function LiveSessions() {
         output: ''
       }));
       setSessionCommands(transformedCommands);
+      return transformedCommands;
     } catch (err) {
       console.error('Error fetching commands:', err);
       setSessionCommands([]);
+      return [];
     }
+  };
+
+  // ✅ NEW: Start attack replay
+  const handleStartReplay = async (sessionId: string) => {
+    const commands = await fetchSessionCommands(sessionId);
+    setReplaySession({ sessionId, commands });
   };
 
   // Apply filters and sorting
   useEffect(() => {
     let filtered = [...sessions];
 
-    // Search filter
     if (searchTerm) {
       filtered = filtered.filter(s => 
         s.ip.includes(searchTerm) || 
@@ -225,7 +266,6 @@ export function LiveSessions() {
       );
     }
 
-    // Severity filter
     if (severityFilter === 'critical') {
       filtered = filtered.filter(s => s.risk >= 8);
     } else if (severityFilter === 'high') {
@@ -234,13 +274,11 @@ export function LiveSessions() {
       filtered = filtered.filter(s => s.risk >= 4 && s.risk < 6);
     }
 
-    // ✅ Sort logic
     if (sortBy === 'recent') {
-      // Keep newest first (already sorted by backend)
       filtered.sort((a, b) => {
         const timeA = new Date(a.timestamp).getTime();
         const timeB = new Date(b.timestamp).getTime();
-        return timeB - timeA; // Newest first
+        return timeB - timeA;
       });
     } else if (sortBy === 'risk') {
       filtered.sort((a, b) => b.risk - a.risk);
@@ -293,15 +331,11 @@ export function LiveSessions() {
     URL.revokeObjectURL(url);
   };
 
-  // Initial load and auto-refresh
+  // ✅ FIXED: Remove polling - WebSocket handles updates
   useEffect(() => {
-    fetchSessions();
-
-    if (autoRefresh) {
-      const interval = setInterval(fetchSessions, 10000); // Refresh every 10 seconds
-      return () => clearInterval(interval);
-    }
-  }, [autoRefresh, timeRange]);
+    fetchSessions(); // Initial fetch only
+    // NO POLLING - WebSocket handles real-time updates
+  }, [timeRange]); // Only re-fetch when time range changes
 
   const handleViewDetails = async (sessionId: string) => {
     setViewDetailsSession(sessionId);
@@ -334,7 +368,7 @@ export function LiveSessions() {
     <div className="min-h-screen bg-gradient-to-br from-gray-900 via-gray-800 to-black">
       <div className="p-6">
         
-        {/* ✅ NEW: Live Attack Alert Banner */}
+        {/* Live Attack Alert Banner */}
         <AnimatePresence>
           {newSessionAlert && (
             <motion.div
@@ -370,7 +404,6 @@ export function LiveSessions() {
           <div>
             <h1 className="text-3xl text-white mb-2 flex items-center gap-3">
               Live Attack Sessions
-              {/* ✅ Live Connection Indicator */}
               {liveIndicator && (
                 <motion.span 
                   initial={{ scale: 0.8, opacity: 0 }}
@@ -438,6 +471,53 @@ export function LiveSessions() {
           })}
         </div>
 
+        {/* ✅ NEW: Threat Intelligence Panel */}
+        {(threatIntel.topAttackers.length > 0 || threatIntel.commonCommands.length > 0) && (
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-6">
+            {/* Top Attackers */}
+            {threatIntel.topAttackers.length > 0 && (
+              <div className="bg-gray-800/90 border border-red-500/50 rounded-xl p-5">
+                <h3 className="text-white font-bold mb-4 flex items-center gap-2 text-lg">
+                  🎯 Top Attackers (Last 24h)
+                </h3>
+                <div className="space-y-3">
+                  {threatIntel.topAttackers.slice(0, 5).map((attacker, i) => (
+                    <div key={i} className="flex items-center justify-between bg-gray-900/60 rounded-lg p-3 border border-gray-700">
+                      <div className="flex items-center gap-3">
+                        <span className="text-2xl">{attacker.flag}</span>
+                        <div>
+                          <code className="text-red-400 font-mono text-sm block">{attacker.ip}</code>
+                          <span className="text-gray-500 text-xs">{attacker.country}</span>
+                        </div>
+                      </div>
+                      <span className="text-white font-bold text-lg">{attacker.count}×</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* Common Commands */}
+            {threatIntel.commonCommands.length > 0 && (
+              <div className="bg-gray-800/90 border border-yellow-500/50 rounded-xl p-5">
+                <h3 className="text-white font-bold mb-4 flex items-center gap-2 text-lg">
+                  ⚡ Common Attack Commands
+                </h3>
+                <div className="space-y-3">
+                  {threatIntel.commonCommands.slice(0, 5).map((cmd, i) => (
+                    <div key={i} className="flex items-center justify-between bg-gray-900/60 rounded-lg p-3 border border-gray-700">
+                      <code className="text-yellow-400 font-mono text-sm truncate flex-1 mr-3">
+                        $ {cmd.cmd}
+                      </code>
+                      <span className="text-white font-bold text-lg whitespace-nowrap">{cmd.count}×</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
         {/* Filter Bar */}
         <div className="flex gap-3 mb-6 p-4 bg-gray-800/90 border border-gray-700 rounded-xl shadow-sm flex-wrap">
           <select 
@@ -447,7 +527,7 @@ export function LiveSessions() {
           >
             <option value="1h">Last Hour</option>
             <option value="24h">Last 24 Hours</option>
-             <option value="7d">Last 7 Days</option>
+            <option value="7d">Last 7 Days</option>
             <option value="all">All Time</option>
           </select>
 
@@ -505,7 +585,6 @@ export function LiveSessions() {
           )}
         </div>
 
-        {/* Error state */}
         {error && (
           <motion.div 
             initial={{ opacity: 0, y: -10 }}
@@ -595,7 +674,6 @@ export function LiveSessions() {
           </motion.div>
         ) : (
           <>
-            {/* Select All */}
             <div className="mb-4 flex items-center gap-2 text-white">
               <input
                 type="checkbox"
@@ -624,6 +702,7 @@ export function LiveSessions() {
                     )}
                     onSelect={() => handleSelectSession(session.id)}
                     onViewDetails={() => handleViewDetails(session.sessionId)}
+                    onStartReplay={() => handleStartReplay(session.sessionId)}
                   />
                 ))}
               </AnimatePresence>
@@ -641,12 +720,24 @@ export function LiveSessions() {
             />
           )}
         </AnimatePresence>
+
+        {/* ✅ NEW: Attack Replay Modal */}
+        <AnimatePresence>
+          {replaySession && (
+            <AttackReplayModal
+              sessionId={replaySession.sessionId}
+              commands={replaySession.commands}
+              onClose={() => setReplaySession(null)}
+              socket={socket}
+            />
+          )}
+        </AnimatePresence>
       </div>
     </div>
   );
 }
 
-// Session Card Component
+// ✅ UPDATED: Session Card with Replay button
 interface SessionCardProps {
   session: Session;
   expanded: boolean;
@@ -654,9 +745,10 @@ interface SessionCardProps {
   onToggle: () => void;
   onSelect: () => void;
   onViewDetails: () => void;
+  onStartReplay: () => void; // NEW
 }
 
-function SessionCard({ session, expanded, selected, onToggle, onSelect, onViewDetails }: SessionCardProps) {
+function SessionCard({ session, expanded, selected, onToggle, onSelect, onViewDetails, onStartReplay }: SessionCardProps) {
   const formatDuration = (seconds: number) => {
     const m = Math.floor(seconds / 60);
     const s = seconds % 60;
@@ -702,7 +794,6 @@ function SessionCard({ session, expanded, selected, onToggle, onSelect, onViewDe
       }`}
     >
       <div className="p-5">
-        {/* ✅ NEW Attack Badge */}
         {session.isNew && (
           <div className="mb-3 bg-red-500/20 border border-red-500 rounded-lg px-3 py-2 flex items-center gap-2">
             <div className="w-2 h-2 bg-red-500 rounded-full animate-pulse" />
@@ -710,7 +801,6 @@ function SessionCard({ session, expanded, selected, onToggle, onSelect, onViewDe
           </div>
         )}
 
-        {/* Header with checkbox */}
         <div className="flex items-start justify-between mb-4">
           <div className="flex items-start gap-3 flex-1">
             <input
@@ -751,7 +841,6 @@ function SessionCard({ session, expanded, selected, onToggle, onSelect, onViewDe
           </div>
         </div>
 
-        {/* Stats Grid */}
         <div className="grid grid-cols-2 gap-3 mb-4">
           <div className="bg-gray-900/60 rounded-lg p-3 border border-gray-700">
             <div className="flex items-center gap-2 mb-1">
@@ -769,13 +858,11 @@ function SessionCard({ session, expanded, selected, onToggle, onSelect, onViewDe
           </div>
         </div>
 
-        {/* Session ID */}
         <div className="mb-4 bg-gray-900/60 rounded-lg p-3 border border-gray-700">
           <div className="text-gray-400 text-xs mb-1">Session ID</div>
           <code className="text-[#00D9FF] text-xs font-mono break-all">{session.sessionId}</code>
         </div>
 
-        {/* Action Buttons */}
         <div className="space-y-2">
           <button
             onClick={onToggle}
@@ -785,7 +872,7 @@ function SessionCard({ session, expanded, selected, onToggle, onSelect, onViewDe
             {expanded ? 'Hide Details' : 'View Details'}
           </button>
 
-          <div className="grid grid-cols-2 gap-2">
+          <div className="grid grid-cols-3 gap-2">
             <button
               onClick={downloadSessionLog}
               className="px-3 py-2 bg-gray-700 text-white text-xs font-medium rounded-lg hover:bg-gray-600 transition-all flex items-center justify-center gap-1"
@@ -800,13 +887,22 @@ function SessionCard({ session, expanded, selected, onToggle, onSelect, onViewDe
               title="View Session Commands"
             >
               <Circle className="w-3 h-3 fill-current" />
-              Commands
+              Cmds
+            </button>
+            {/* ✅ NEW: Replay Button */}
+            <button
+              onClick={onStartReplay}
+              className="px-3 py-2 bg-purple-600 text-white text-xs font-medium rounded-lg hover:bg-purple-700 transition-all flex items-center justify-center gap-1"
+              title="Replay Attack"
+              disabled={session.commands === 0}
+            >
+              <Play className="w-3 h-3" />
+              Replay
             </button>
           </div>
         </div>
       </div>
 
-      {/* Expanded Details */}
       <AnimatePresence>
         {expanded && (
           <motion.div
@@ -860,7 +956,7 @@ function SessionCard({ session, expanded, selected, onToggle, onSelect, onViewDe
   );
 }
 
-// Session Details Drawer Component
+// Session Details Drawer Component (unchanged)
 function SessionDetailsDrawer({ sessionId, commands, onClose }: { sessionId: string; commands: any[]; onClose: () => void }) {
   const [searchTerm, setSearchTerm] = useState('');
   const [copiedIndex, setCopiedIndex] = useState<number | null>(null);
@@ -890,7 +986,6 @@ function SessionDetailsDrawer({ sessionId, commands, onClose }: { sessionId: str
         className="relative bg-gray-900 rounded-2xl shadow-2xl max-w-4xl w-full border-2 border-[#00D9FF]"
         onClick={(e) => e.stopPropagation()}
       >
-        {/* Header */}
         <div className="px-6 py-4 border-b border-gray-700 flex items-center justify-between">
           <div>
             <h2 className="text-2xl font-bold text-white">Session Command History</h2>
@@ -904,7 +999,6 @@ function SessionDetailsDrawer({ sessionId, commands, onClose }: { sessionId: str
           </button>
         </div>
 
-        {/* Search Bar */}
         <div className="px-6 py-3 border-b border-gray-700">
           <input
             type="text"
@@ -915,7 +1009,6 @@ function SessionDetailsDrawer({ sessionId, commands, onClose }: { sessionId: str
           />
         </div>
 
-        {/* Commands List */}
         <div className="p-6 max-h-[500px] overflow-y-auto">
           {filteredCommands.length === 0 ? (
             <div className="text-center text-gray-500 py-12">
@@ -970,7 +1063,6 @@ function SessionDetailsDrawer({ sessionId, commands, onClose }: { sessionId: str
           )}
         </div>
 
-        {/* Footer */}
         <div className="px-6 py-4 border-t border-gray-700 flex justify-between items-center">
           <div className="text-gray-400 text-sm">
             {filteredCommands.length} command{filteredCommands.length !== 1 ? 's' : ''} found
@@ -978,6 +1070,162 @@ function SessionDetailsDrawer({ sessionId, commands, onClose }: { sessionId: str
           <button
             onClick={onClose}
             className="px-6 py-2 bg-gradient-to-r from-[#00D9FF] to-[#8B5CF6] text-white font-medium rounded-lg hover:shadow-lg hover:shadow-[#00D9FF]/30 transition-all"
+          >
+            Close
+          </button>
+        </div>
+      </motion.div>
+    </motion.div>
+  );
+}
+
+// ✅ NEW: Attack Replay Modal Component
+function AttackReplayModal({ sessionId, commands, onClose, socket }: { 
+  sessionId: string; 
+  commands: any[]; 
+  onClose: () => void;
+  socket: Socket | null;
+}) {
+  const [liveCommands, setLiveCommands] = useState(commands);
+  const [isSessionLive, setIsSessionLive] = useState(false);
+  const bottomRef = useRef<HTMLDivElement>(null);
+
+  // Fetch latest commands on mount
+  useEffect(() => {
+    const fetchLatest = async () => {
+      try {
+        const response = await axios.get(`${API_BASE}/sessions/${sessionId}/commands`);
+        const latest = response.data.commands.map((cmd: any, i: number) => ({
+          id: i + 1,
+          command: cmd.input,
+          timestamp: cmd.timestamp,
+          output: ''
+        }));
+        setLiveCommands(latest);
+      } catch (err) {
+        console.error('Failed to fetch commands:', err);
+      }
+    };
+    fetchLatest();
+  }, [sessionId]);
+
+  // Listen for real-time updates
+  useEffect(() => {
+    if (!socket) return;
+
+    socket.on('session_updated', (updatedSession: any) => {
+      if (updatedSession.sessionId !== sessionId) return;
+      
+      axios.get(`${API_BASE}/sessions/${sessionId}/commands`)
+        .then(response => {
+          const latest = response.data.commands.map((cmd: any, i: number) => ({
+            id: i + 1,
+            command: cmd.input,
+            timestamp: cmd.timestamp,
+            output: ''
+          }));
+          setLiveCommands(latest);
+          setIsSessionLive(true);
+        });
+    });
+
+    socket.on('session_closed', (data: { sessionId: string }) => {
+      if (data.sessionId === sessionId) {
+        setIsSessionLive(false);
+      }
+    });
+
+    return () => {
+      socket.off('session_updated');
+      socket.off('session_closed');
+    };
+  }, [socket, sessionId]);
+
+  // Auto-scroll as new commands come in
+  useEffect(() => {
+    bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [liveCommands]);
+
+  return (
+    <motion.div
+      initial={{ opacity: 0 }}
+      animate={{ opacity: 1 }}
+      exit={{ opacity: 0 }}
+      className="fixed inset-0 z-50 bg-black/90 backdrop-blur-sm flex items-center justify-center p-4"
+      onClick={onClose}
+    >
+      <motion.div
+        initial={{ scale: 0.9, opacity: 0 }}
+        animate={{ scale: 1, opacity: 1 }}
+        exit={{ scale: 0.9, opacity: 0 }}
+        className="bg-gray-900 rounded-2xl border-2 border-[#00D9FF] max-w-4xl w-full max-h-[85vh] overflow-hidden flex flex-col"
+        onClick={(e) => e.stopPropagation()}
+      >
+        {/* Header */}
+        <div className="p-6 border-b border-gray-700 flex items-center justify-between bg-gradient-to-r from-purple-900/50 to-blue-900/50">
+          <div>
+            <h2 className="text-2xl font-bold text-white mb-2 flex items-center gap-3">
+              🎬 Attack Session Replay
+              {isSessionLive && (
+                <span className="flex items-center gap-2 text-sm bg-green-500/20 text-green-400 px-3 py-1 rounded-full border border-green-500">
+                  <div className="w-2 h-2 bg-green-400 rounded-full animate-pulse" />
+                  LIVE
+                </span>
+              )}
+            </h2>
+            <code className="text-[#00D9FF] text-sm">{sessionId}</code>
+          </div>
+          <button onClick={onClose} className="p-2 hover:bg-gray-800 rounded-lg transition-colors">
+            <X className="w-6 h-6 text-gray-400" />
+          </button>
+        </div>
+
+        {/* Terminal */}
+        <div className="flex-1 p-6 overflow-y-auto bg-black font-mono text-sm">
+          <div className="text-green-400 mb-2">$ ssh honeypot@target -p 22</div>
+          <div className="text-gray-500 mb-4">Connection established</div>
+
+          {liveCommands.map((cmd, i) => (
+            <motion.div
+              key={i}
+              initial={{ opacity: 0, x: -20 }}
+              animate={{ opacity: 1, x: 0 }}
+              className="mb-3"
+            >
+              <div className="text-green-400">
+                <span className="text-gray-500">[{new Date(cmd.timestamp).toLocaleTimeString()}]</span>
+                {' '}$ {cmd.command}
+              </div>
+              {cmd.output && (
+                <div className="text-gray-400 ml-4 mt-1">{cmd.output}</div>
+              )}
+            </motion.div>
+          ))}
+
+          {isSessionLive && (
+            <div className="text-green-400 animate-pulse">▊</div>
+          )}
+
+          {!isSessionLive && liveCommands.length > 0 && (
+            <div className="text-gray-500 mt-4">[Session ended]</div>
+          )}
+
+          {liveCommands.length === 0 && (
+            <div className="text-gray-500">No commands executed yet...</div>
+          )}
+
+          <div ref={bottomRef} />
+        </div>
+
+        {/* Footer */}
+        <div className="p-4 border-t border-gray-700 bg-gray-800/50 flex items-center justify-between">
+          <span className="text-gray-400 text-sm">
+            {liveCommands.length} command{liveCommands.length !== 1 ? 's' : ''}
+            {isSessionLive ? ' • Attacker still active' : ' • Session closed'}
+          </span>
+          <button
+            onClick={onClose}
+            className="px-6 py-2 bg-gradient-to-r from-[#00D9FF] to-[#8B5CF6] text-white font-medium rounded-lg hover:shadow-lg transition-all"
           >
             Close
           </button>

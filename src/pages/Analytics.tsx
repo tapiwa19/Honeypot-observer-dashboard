@@ -85,34 +85,46 @@ export function Analytics() {
       else if (timeRange === '30days') apiTimeRange = 'now-30d';
       else if (timeRange === 'today') apiTimeRange = 'now-24h';
 
+      console.log(`📊 [ANALYTICS] Fetching data for range: ${timeRange} → ${apiTimeRange}`);
+
       const [timelineRes, countriesRes, statsRes, distributionRes] = await Promise.all([
-  axios.get(`${API_BASE}/analytics/timeline?range=${apiTimeRange}`),
-  axios.get(`${API_BASE}/analytics/countries?range=${apiTimeRange}`),
-  axios.get(`${API_BASE}/analytics/stats?range=${apiTimeRange}`),
-  axios.get(`${API_BASE}/analytics/distribution?range=${apiTimeRange}`)
-]);
+        axios.get(`${API_BASE}/analytics/timeline?range=${apiTimeRange}`),
+        axios.get(`${API_BASE}/analytics/countries?range=${apiTimeRange}`),
+        axios.get(`${API_BASE}/analytics/stats?range=${apiTimeRange}`),
+        axios.get(`${API_BASE}/analytics/distribution?range=${apiTimeRange}`)
+      ]);
+      
       setTimeline(timelineRes.data);
       
-      const totalCountryAttacks = countriesRes.data.reduce((sum: number, c: CountryData) => sum + c.attacks, 0);
-      const countriesWithPercentage = countriesRes.data.map((c: CountryData) => ({
+      // ✅ FIX: Properly calculate percentages
+      const countriesData = countriesRes.data;
+      const totalCountryAttacks = countriesData.reduce((sum: number, c: CountryData) => sum + c.attacks, 0);
+      
+      const countriesWithPercentage = countriesData.map((c: CountryData) => ({
         ...c,
         percentage: totalCountryAttacks > 0 ? Math.round((c.attacks / totalCountryAttacks) * 100) : 0
       }));
+      
       setCountries(countriesWithPercentage);
       setAttackDistribution(distributionRes.data);
       
       setStats({
-  totalAttacks: statsRes.data.totalAttacks || 0,
-  uniqueIPs: statsRes.data.uniqueIPs || 0,  // Changed from countriesDetected
-  topVector: 'SSH Brute Force',
-  dataAnalyzed: timeRange === 'today' ? '234 MB' : timeRange === '7days' ? '2.3 GB' : '8.7 GB'
-});
+        totalAttacks: statsRes.data.totalAttacks || 0,
+        uniqueIPs: statsRes.data.uniqueIPs || 0,
+        topVector: 'SSH Brute Force',
+        dataAnalyzed: timeRange === 'today' ? '234 MB' : timeRange === '7days' ? '2.3 GB' : '8.7 GB'
+      });
       
       setLastUpdate(new Date());
       
-      console.log(`📊 Fetched timeline data for ${timeRange}: ${timelineRes.data.length} data points`);
+      console.log(`✅ [ANALYTICS] Loaded:`, {
+        timeline: timelineRes.data.length,
+        countries: countriesData.length,
+        attacks: statsRes.data.totalAttacks,
+        distribution: distributionRes.data.length
+      });
     } catch (err) {
-      console.error('Error fetching analytics data:', err);
+      console.error('❌ [ANALYTICS] Error fetching data:', err);
     }
   };
 
@@ -157,8 +169,6 @@ export function Analytics() {
     );
   }
 
-  
-
   return (
     <div className="min-h-screen bg-gradient-to-br from-gray-900 via-gray-800 to-black text-white p-6">
       {/* Header */}
@@ -200,7 +210,7 @@ export function Analytics() {
         </div>
       </div>
 
-      {/* Live Status Indicators - BIG PROMINENT DISPLAY */}
+      {/* Live Status Indicators */}
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-6">
         {/* Real-time Status */}
         <div className={`rounded-xl p-4 border-2 transition-all ${
@@ -226,7 +236,7 @@ export function Analytics() {
           </div>
         </div>
 
-        {/* Live Sessions Counter - THE STAR OF THE SHOW! */}
+        {/* Live Sessions Counter */}
         <div className={`rounded-xl p-4 border-2 transition-all ${
           activeSessionsCount > 0
             ? 'bg-red-500/10 border-red-500/50 animate-pulse'
@@ -311,17 +321,17 @@ export function Analytics() {
         >
           {activeTab === 'overview' && (
             <OverviewTab 
-  timeline={timeline}
-  countries={countries}
-  attackTypes={attackDistribution}
-  liveSessions={liveSessions}
-  activeSessionsCount={activeSessionsCount}
-/>
+              timeline={timeline}
+              countries={countries}
+              attackTypes={attackDistribution}
+              liveSessions={liveSessions}
+              activeSessionsCount={activeSessionsCount}
+            />
           )}
-         {activeTab === 'geographic' && <GeographicTab countries={countries} timeRange={timeRange} />}
-         {activeTab === 'timeline' && <TimelineTab timeline={timeline} stats={stats} />}
-         {activeTab === 'patterns' && <PatternsTab attackDistribution={attackDistribution} />}
-         {activeTab === 'threats' && <ThreatsTab attackDistribution={attackDistribution} />}
+          {activeTab === 'geographic' && <GeographicTab countries={countries} timeRange={timeRange} />}
+          {activeTab === 'timeline' && <TimelineTab timeline={timeline} stats={stats} />}
+          {activeTab === 'patterns' && <PatternsTab attackDistribution={attackDistribution} />}
+          {activeTab === 'threats' && <ThreatsTab attackDistribution={attackDistribution} />}
         </motion.div>
       </AnimatePresence>
     </div>
@@ -346,7 +356,7 @@ function OverviewTab({
 }: OverviewTabProps) {
   return (
     <>
-      {/* LIVE SESSIONS TABLE - TOP PRIORITY! */}
+      {/* LIVE SESSIONS TABLE */}
       {liveSessions.length > 0 && (
         <div className="bg-gray-800/90 border border-gray-700 rounded-xl p-5 mb-6">
           <div className="flex items-center justify-between mb-4">
@@ -513,13 +523,17 @@ function OverviewTab({
     </>
   );
 }
-// Geographic Tab - Real Data
+
+// ✅ Geographic Tab - WorldMap fetches its own data
 function GeographicTab({ countries, timeRange }: { countries: CountryData[]; timeRange: string }) {
+  console.log('🗺️ [GEOGRAPHIC] Rendering with', countries.length, 'countries');
+  
   return (
     <div className="space-y-6">
       {/* Real World Map */}
       <div className="bg-gray-800/90 border border-gray-700 rounded-xl p-6">
         <h3 className="text-white text-lg mb-4">🗺️ Global Attack Origins - Real-Time Map</h3>
+        {/* WorldMap fetches its own data from backend */}
         <WorldMap timeRange={timeRange} />
       </div>
 
@@ -561,7 +575,7 @@ function GeographicTab({ countries, timeRange }: { countries: CountryData[]; tim
 }
 
 // Timeline Tab - Real Data
-function TimelineTab({ timeline,  }: { timeline: TimelineData[]; stats: any }) {
+function TimelineTab({ timeline }: { timeline: TimelineData[]; stats: any }) {
   const [timelineView, setTimelineView] = useState<'6h' | '1d' | 'all'>('all');
   
   const filteredTimeline = timelineView === 'all' ? timeline : 
@@ -762,6 +776,7 @@ function PatternsTab({ attackDistribution }: { attackDistribution: { name: strin
     </div>
   );
 }
+
 // Threats Tab - Real Data
 function ThreatsTab({ attackDistribution }: { attackDistribution: { name: string; value: number }[] }) {
   const threats = [

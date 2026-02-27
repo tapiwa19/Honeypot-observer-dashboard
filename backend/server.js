@@ -22,10 +22,12 @@ dotenv.config();
 const app = express();
 await connectDB();
 const httpServer = createServer(app);
+// NEW CODE - Allows both ports
 const io = new Server(httpServer, {
   cors: {
-    origin: process.env.CORS_ORIGIN || 'http://localhost:3000',
-    methods: ['GET', 'POST']
+    origin: ['http://localhost:3000', 'http://localhost:3001'],
+    methods: ['GET', 'POST'],
+    credentials: true
   }
 });
 
@@ -33,9 +35,25 @@ const io = new Server(httpServer, {
 app.use(helmet());
 app.use(compression());
 app.use(cors({
-  origin: process.env.CORS_ORIGIN || 'http://localhost:3000'
+  origin: ['http://localhost:3000', 'http://localhost:3001'],
+  credentials: true
 }));
 app.use(express.json());
+
+app.use((req, res, next) => {
+  const ip = req.ip || req.connection.remoteAddress;
+  
+  if (!requestCounts.has(ip)) {
+    requestCounts.set(ip, { count: 0, lastSeen: Date.now() });
+  }
+  
+  const data = requestCounts.get(ip);
+  data.count++;
+  data.lastSeen = Date.now();
+  
+  next();
+});
+
 app.use('/api/auth', authRouter);
 
 // ✅ NEW: Register notification routes
@@ -155,12 +173,12 @@ app.get('/api/dashboard/stats', async (req, res) => {
     todayStart.setHours(0, 0, 0, 0);
 
     const totalResponse = await esClient.count({
-      index: process.env.ELASTICSEARCH_INDEX || 'cowrie-*',
-      body: {
-        query: {
-          range: {
-            '@timestamp': {
-              gte: todayStart.toISOString()
+  index: process.env.ELASTICSEARCH_INDEX || 'cowrie-*',
+  body: {
+    query: {
+      range: {
+        '@timestamp': {
+          gte: 'now-24h'
             }
           }
         }
@@ -195,7 +213,22 @@ app.get('/api/dashboard/stats', async (req, res) => {
       uniqueCountries.add(geoData.country);
     });
 
-    const activeSessionsCount = Array.from(activeSessions.values()).length;
+    const activeSessionsRes = await esClient.search({
+  index: process.env.ELASTICSEARCH_INDEX || 'cowrie-*',
+  size: 0,
+  body: {
+    query: {
+      bool: {
+        must: [{ range: { '@timestamp': { gte: 'now-10m' } } }],
+        must_not: [{ term: { 'eventid.keyword': 'cowrie.session.closed' } }]
+      }
+    },
+    aggs: {
+      active: { cardinality: { field: 'session.keyword' } }
+    }
+  }
+});
+const activeSessionsCount = activeSessionsRes.aggregations?.active?.value || 0;
 
     res.json({
       totalAttacks: totalResponse.count,
@@ -212,10 +245,38 @@ app.get('/api/dashboard/stats', async (req, res) => {
 // Get Recent Attacks
 app.get('/api/dashboard/attacks', async (req, res) => {
   try {
+    const { range, limit } = req.query;
+    
+    if (range) {
+      console.log(`📊 [ATTACKS] Fetching with time range: ${range}`);
+    }
+    
+    const size = limit ? parseInt(limit) : 50;
+    
+    let queryBody;
+    
+    if (range && range !== 'all') {
+      queryBody = {
+        query: {
+          range: {
+            '@timestamp': {
+              gte: range
+            }
+          }
+        },
+        sort: [{ '@timestamp': { order: 'desc' } }],
+        size: size
+      };
+    } else {
+      queryBody = {
+        sort: [{ '@timestamp': { order: 'desc' } }],
+        size: size
+      };
+    }
+    
     const response = await esClient.search({
       index: process.env.ELASTICSEARCH_INDEX || 'cowrie-*',
-      size: 50,
-      sort: [{ '@timestamp': { order: 'desc' } }]
+      body: queryBody
     });
 
     const attacks = response.hits.hits.map(hit => {
@@ -236,11 +297,18 @@ app.get('/api/dashboard/attacks', async (req, res) => {
         ip: ip,
         country: geoData.country,
         flag: geoData.flag,
-        type: source.eventid || 'connection',
+        type: String(source.eventid || 'connection'),
         severity: severity,
-        details: source.message || source.input || 'Attack detected'
+        details: source.message || (typeof source.input === 'object' ? source.input?.command : source.input) || 'Attack detected',
+         input: typeof source.input === 'string' ? source.input : 
+         typeof source.input === 'object' && source.input?.command ? source.input.command :
+         null
       };
     });
+
+    if (range) {
+      console.log(`✅ [ATTACKS] Returning ${attacks.length} attacks for range: ${range}`);
+    }
 
     res.json(attacks);
   } catch (error) {
@@ -775,144 +843,203 @@ app.get('/api/analytics/timeline', async (req, res) => {
 // Analytics Countries
 app.get('/api/analytics/countries', async (req, res) => {
   try {
-    const range = req.query.range || 'now-7d';
+    const { range } = req.query;
     
-    console.log(`\n🌍 [COUNTRIES] Fetching range: ${range}`);
+    console.log(`🌍 [COUNTRIES] Fetching with range: ${range}`);
     
-    let response;
-    let field = 'src_ip';
+    // ✅ Build time filter
+    let queryBody;
     
-    try {
-      response = await esClient.search({
-        index: process.env.ELASTICSEARCH_INDEX || 'cowrie-*',
-        size: 0,
-        body: {
-          query: {
-            range: {
-              '@timestamp': {
-                gte: range
-              }
+    if (range && range !== 'all') {
+      queryBody = {
+        query: {
+          range: {
+            '@timestamp': {
+              gte: range
             }
-          },
-          aggs: {
-            top_ips: {
-              terms: {
-                field: 'src_ip',
-                size: 200
-              }
+          }
+        },
+        aggs: {
+          unique_ips: {
+            terms: {
+              field: 'src_ip.keyword',  // ✅ This field EXISTS
+              size: 1000
             }
           }
         }
-      });
-    } catch (err) {
-      console.log('   ⚠️ src_ip failed, trying src_ip.keyword...');
-      field = 'src_ip.keyword';
-      response = await esClient.search({
-        index: process.env.ELASTICSEARCH_INDEX || 'cowrie-*',
-        size: 0,
-        body: {
-          query: {
-            range: {
-              '@timestamp': {
-                gte: range
-              }
-            }
-          },
-          aggs: {
-            top_ips: {
-              terms: {
-                field: 'src_ip.keyword',
-                size: 200
-              }
+      };
+    } else {
+      queryBody = {
+        aggs: {
+          unique_ips: {
+            terms: {
+              field: 'src_ip.keyword',  // ✅ This field EXISTS
+              size: 1000
             }
           }
         }
-      });
+      };
     }
-
-    console.log(`   Using field: ${field}`);
-    console.log(`   Found ${response.aggregations?.top_ips?.buckets.length || 0} unique IPs`);
-
-    const countryMap = new Map();
-    let totalAttacks = 0;
-
-    const buckets = response.aggregations?.top_ips?.buckets || [];
     
-    buckets.forEach(bucket => {
+    const response = await esClient.search({
+      index: process.env.ELASTICSEARCH_INDEX || 'cowrie-*',
+      size: 0,
+      body: queryBody
+    });
+    
+    const total = response.aggregations?.unique_ips?.buckets.reduce((sum, b) => sum + b.doc_count, 0) || 0;
+    const ipBuckets = response.aggregations?.unique_ips?.buckets || [];
+    
+    // ✅ Group IPs by country using getCountryFromIP
+    const countryMap = new Map();
+    
+    ipBuckets.forEach(bucket => {
       const ip = bucket.key;
-      const attackCount = bucket.doc_count;
-      const geoData = getCountryFromIP(ip);
-      const countryName = geoData.country;
+      const attacks = bucket.doc_count;
+      const geoData = getCountryFromIP(ip);  // ✅ Use your existing function
       
-      if (!countryMap.has(countryName)) {
-        countryMap.set(countryName, {
-          country: countryName,
+      if (countryMap.has(geoData.country)) {
+        countryMap.get(geoData.country).attacks += attacks;
+      } else {
+        countryMap.set(geoData.country, {
+          country: geoData.country,
           code: geoData.code,
-          flag: geoData.flag,
-          attacks: 0
+          attacks: attacks,
+          flag: geoData.flag
         });
       }
-      
-      countryMap.get(countryName).attacks += attackCount;
-      totalAttacks += attackCount;
     });
-
+    
+    // Convert to array and calculate percentages
     const countries = Array.from(countryMap.values())
       .map(country => ({
         ...country,
-        percentage: totalAttacks > 0 ? Math.round((country.attacks / totalAttacks) * 100) : 0
+        percentage: total > 0 ? ((country.attacks / total) * 100).toFixed(1) : '0.0'
       }))
-      .sort((a, b) => b.attacks - a.attacks)
-      .slice(0, 20);
-
-    console.log(`✅ [COUNTRIES] Returning ${countries.length} countries, ${totalAttacks} total attacks`);
+      .sort((a, b) => b.attacks - a.attacks);
+    
+    console.log(`✅ [COUNTRIES] Found ${countries.length} countries with ${total} total attacks`);
     
     res.json(countries);
+    
   } catch (error) {
     console.error('❌ [COUNTRIES] Error:', error.message);
-    res.status(500).json({ error: 'Failed to fetch country data', details: error.message });
+    res.status(500).json({ error: 'Failed to fetch countries data', details: error.message });
   }
 });
 
+// ✅ Helper function for country flags
+function getCountryFlag(countryCode) {
+  if (!countryCode || countryCode === 'XX') return '🏴';
+  
+  const codePoints = countryCode
+    .toUpperCase()
+    .split('')
+    .map(char => 127397 + char.charCodeAt());
+  
+  return String.fromCodePoint(...codePoints);
+}
 // Get Credentials
-app.get('/api/credentials', async (req, res) => {
+app.get('/api/credentials/table', async (req, res) => {
   try {
+    const { range } = req.query;
+    
+    if (range) {
+      console.log(`🔑 [CREDENTIALS] Fetching with time range: ${range}`);
+    }
+    
+    let timeFilter = null;
+    if (range && range !== 'all') {
+      timeFilter = {
+        range: {
+          '@timestamp': {
+            gte: range
+          }
+        }
+      };
+    }
+    
+    const queryMustClauses = [
+      {
+        bool: {
+          should: [
+            { match: { eventid: 'cowrie.login.success' } },
+            { match: { eventid: 'cowrie.login.failed' } }
+          ]
+        }
+      }
+    ];
+    
+    if (timeFilter) {
+      queryMustClauses.push(timeFilter);
+    }
+    
     const response = await esClient.search({
       index: process.env.ELASTICSEARCH_INDEX || 'cowrie-*',
-      size: 100,
+      size: 0,
       body: {
         query: {
           bool: {
-            should: [
-              { match: { eventid: 'cowrie.login.success' } },
-              { match: { eventid: 'cowrie.login.failed' } }
-            ]
+            must: queryMustClauses
           }
         },
-        sort: [{ '@timestamp': { order: 'desc' } }]
+        aggs: {
+          credentials: {
+            composite: {
+              size: 1000,
+              sources: [
+                { username: { terms: { field: 'username.keyword' } } },
+                { password: { terms: { field: 'password.keyword' } } }
+              ]
+            },
+            aggs: {
+              attempts: { value_count: { field: 'username.keyword' } },
+              success: {
+                filter: { term: { 'eventid.keyword': 'cowrie.login.success' } }
+              },
+              failed: {
+                filter: { term: { 'eventid.keyword': 'cowrie.login.failed' } }
+              },
+              countries: {
+                terms: { field: 'src_ip.keyword', size: 10 }
+              },
+              first_seen: { min: { field: '@timestamp' } },
+              last_seen: { max: { field: '@timestamp' } }
+            }
+          }
+        }
       }
     });
 
-    const credentials = response.hits.hits.map(hit => {
-      const source = hit._source;
-      const ip = source.src_ip || source.source_ip || 'unknown';
-      const geoData = getCountryFromIP(ip);
+    const credentials = response.aggregations?.credentials?.buckets.map(bucket => {
+      const countries = bucket.countries.buckets.map(c => {
+        const geoData = getCountryFromIP(c.key);
+        return geoData.flag;
+      });
 
       return {
-        id: hit._id,
-        timestamp: source['@timestamp'] || source.timestamp,
-        username: source.username || 'unknown',
-        password: source.password || 'unknown',
-        ip: ip,
-        country: geoData.flag,
-        success: source.eventid === 'cowrie.login.success'
+        username: bucket.key.username,
+        password: bucket.key.password,
+        attempts: bucket.attempts.value,
+        success: bucket.success.doc_count,
+        failed: bucket.failed.doc_count,
+        successRate: bucket.attempts.value > 0 
+          ? Math.round((bucket.success.doc_count / bucket.attempts.value) * 100) 
+          : 0,
+        countries: countries.slice(0, 5),
+        firstSeen: bucket.first_seen.value_as_string,
+        lastSeen: bucket.last_seen.value_as_string
       };
-    });
+    }) || [];
+
+    if (range) {
+      console.log(`✅ [CREDENTIALS] Returning ${credentials.length} credential pairs for range: ${range}`);
+    }
 
     res.json(credentials);
   } catch (error) {
-    console.error('Error fetching credentials:', error);
-    res.status(500).json({ error: 'Failed to fetch credentials' });
+    console.error('Error fetching credentials table:', error);
+    res.status(500).json({ error: 'Failed to fetch credentials table' });
   }
 });
 
@@ -985,21 +1112,21 @@ app.get('/api/analytics/behavioral', async (req, res) => {
 
     const vulnerabilities = [
       {
-        cve: 'CVE-2024-1234',
+        cve: 'CVE-2026-1234',
         name: 'SSH Authentication Bypass',
         severity: 9.8,
         targetFrequency: totalAttacks,
         successRate: 12
       },
       {
-        cve: 'CVE-2024-5678',
+        cve: 'CVE-2026-5678',
         name: 'Remote Code Execution',
         severity: 8.9,
         targetFrequency: Math.floor(totalAttacks * 0.6),
         successRate: 8
       },
       {
-        cve: 'CVE-2024-9012',
+        cve: 'CVE-2026-9012',
         name: 'Privilege Escalation',
         severity: 7.5,
         targetFrequency: Math.floor(totalAttacks * 0.4),
@@ -1228,77 +1355,6 @@ app.delete('/api/data/clear', async (req, res) => {
   }
 });
 
-// Credentials Table
-app.get('/api/credentials/table', async (req, res) => {
-  try {
-    const response = await esClient.search({
-      index: process.env.ELASTICSEARCH_INDEX || 'cowrie-*',
-      size: 0,
-      body: {
-        query: {
-          bool: {
-            should: [
-              { match: { eventid: 'cowrie.login.success' } },
-              { match: { eventid: 'cowrie.login.failed' } }
-            ]
-          }
-        },
-        aggs: {
-          credentials: {
-            composite: {
-              size: 1000,
-              sources: [
-                { username: { terms: { field: 'username.keyword' } } },
-                { password: { terms: { field: 'password.keyword' } } }
-              ]
-            },
-            aggs: {
-              attempts: { value_count: { field: 'username.keyword' } },
-              success: {
-                filter: { term: { 'eventid.keyword': 'cowrie.login.success' } }
-              },
-              failed: {
-                filter: { term: { 'eventid.keyword': 'cowrie.login.failed' } }
-              },
-              countries: {
-                terms: { field: 'src_ip.keyword', size: 10 }
-              },
-              first_seen: { min: { field: '@timestamp' } },
-              last_seen: { max: { field: '@timestamp' } }
-            }
-          }
-        }
-      }
-    });
-
-    const credentials = response.aggregations?.credentials?.buckets.map(bucket => {
-      const countries = bucket.countries.buckets.map(c => {
-        const geoData = getCountryFromIP(c.key);
-        return geoData.flag;
-      });
-
-      return {
-        username: bucket.key.username,
-        password: bucket.key.password,
-        attempts: bucket.attempts.value,
-        success: bucket.success.doc_count,
-        failed: bucket.failed.doc_count,
-        successRate: bucket.attempts.value > 0 
-          ? Math.round((bucket.success.doc_count / bucket.attempts.value) * 100) 
-          : 0,
-        countries: countries.slice(0, 5),
-        firstSeen: bucket.first_seen.value_as_string,
-        lastSeen: bucket.last_seen.value_as_string
-      };
-    }) || [];
-
-    res.json(credentials);
-  } catch (error) {
-    console.error('Error fetching credentials table:', error);
-    res.status(500).json({ error: 'Failed to fetch credentials table' });
-  }
-});
-
 // Debug Endpoints
 app.get('/api/debug/events', async (req, res) => {
   try {
@@ -1524,13 +1580,48 @@ io.on('connection', (socket) => {
 // ============================================
 
 let lastCheckedTimestamp = new Date();
+const knownSessions = new Map();
+
+const requestCounts = new Map(); // Track requests per IP
+
+// Monitor for DDoS every 60 seconds
+setInterval(() => {
+  const suspicious = [];
+  const now = Date.now();
+  
+  for (const [ip, data] of requestCounts.entries()) {
+    if (data.count > 100) { // 100+ requests per minute = suspicious
+      suspicious.push({ 
+        ip, 
+        count: data.count,
+        lastSeen: data.lastSeen 
+      });
+    }
+  }
+  
+  if (suspicious.length > 0) {
+    const totalRequests = Array.from(requestCounts.values())
+      .reduce((sum, d) => sum + d.count, 0);
+    
+    console.log(`⚠️ [DDoS] ${suspicious.length} suspicious IPs detected`);
+    
+    io.emit('ddos_warning', {
+      suspiciousIPs: suspicious.slice(0, 10), // Top 10 only
+      totalRequests: totalRequests,
+      timestamp: new Date().toISOString()
+    });
+  }
+  
+  // Clear counts every minute
+  requestCounts.clear();
+}, 60000);
+
 
 // Monitor for new sessions every 2 seconds
 async function broadcastNewSessions() {
   try {
     const now = new Date();
     
-    // Get events since last check
     const newEvents = await esClient.search({
       index: process.env.ELASTICSEARCH_INDEX || 'cowrie-*',
       size: 100,
@@ -1550,7 +1641,6 @@ async function broadcastNewSessions() {
     if (newEvents.hits.hits.length > 0) {
       console.log(`🔴 [LIVE] Found ${newEvents.hits.hits.length} new events`);
       
-      // Group by session
       const sessionEventsMap = new Map();
       
       newEvents.hits.hits.forEach(hit => {
@@ -1572,7 +1662,6 @@ async function broadcastNewSessions() {
         });
       });
 
-      // Broadcast each session
       for (const [sessionId, events] of sessionEventsMap.entries()) {
         events.sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
         
@@ -1589,40 +1678,68 @@ async function broadcastNewSessions() {
         else if (commands > 5) risk = 7;
         else if (commands > 2) risk = 5;
 
+        // ✅ SANITIZED session data
         const sessionData = {
-          id: sessionId,
-          sessionId: sessionId,
-          ip: ip,
-          country: geoData.flag,
-          countryName: geoData.country,
+          id: String(sessionId).slice(0, 100),
+          sessionId: String(sessionId).slice(0, 100),
+          ip: String(ip).replace(/[<>'"]/g, '').slice(0, 45),
+          country: String(geoData.flag).slice(0, 10),
+          countryName: String(geoData.country).replace(/[<>'"]/g, '').slice(0, 100),
           duration: 0,
-          commands: commands,
-          risk: risk,
+          commands: Math.max(0, Math.min(10000, commands)),
+          risk: Math.max(0, Math.min(10, risk)),
           timestamp: firstEvent.timestamp,
           timeAgo: 'just now',
           status: isClosed ? 'closed' : 'active',
-          isClosed: isClosed,
-          isNew: true // ✅ Mark as new for frontend highlighting
+          isClosed: !!isClosed,
+          isNew: true
         };
 
-        // Broadcast to all connected clients
-        io.emit('new_session', sessionData);
-        
-        console.log(`📡 [BROADCAST] New session: ${ip} (${geoData.country}) - Risk: ${risk}/10`);
+        // ✅ CHECK IF NEW OR UPDATE
+        const wasKnown = knownSessions.has(sessionId);
+        const previousData = knownSessions.get(sessionId);
 
-        // ✅ Send notification for high-risk sessions
-        if (risk >= 7 && notificationService) {
-          const alert = {
-            type: 'session',
-            severity: risk >= 9 ? 'critical' : 'high',
-            title: `🚨 ${risk >= 9 ? 'CRITICAL' : 'HIGH RISK'} Attack Detected!`,
-            message: `New SSH attack from ${ip} (${geoData.country}) - Risk: ${risk}/10`,
-            session: sessionData,
-            timestamp: new Date().toISOString()
-          };
+        if (!wasKnown) {
+          // ✅ NEW SESSION
+          io.emit('new_session', sessionData);
+          console.log(`📡 [BROADCAST] New session: ${ip} (${geoData.country}) - Risk: ${risk}/10`);
+          
+          knownSessions.set(sessionId, {
+            commands: commands,
+            status: isClosed ? 'closed' : 'active',
+            isClosed: isClosed
+          });
 
-          // Send notifications
-          await notificationService.sendNotification(alert);
+          // Send notification
+          if (risk >= 7 && notificationService) {
+            const alert = {
+              type: 'session',
+              severity: risk >= 9 ? 'critical' : 'high',
+              title: `🚨 ${risk >= 9 ? 'CRITICAL' : 'HIGH RISK'} Attack Detected!`,
+              message: `New SSH attack from ${ip} (${geoData.country}) - Risk: ${risk}/10`,
+              session: sessionData,
+              timestamp: new Date().toISOString()
+            };
+            await notificationService.sendNotification(alert);
+          }
+        } else {
+          // ✅ SESSION UPDATE
+          if (previousData.commands !== commands || previousData.status !== sessionData.status) {
+            io.emit('session_updated', sessionData);
+            console.log(`🔄 [UPDATE] ${sessionId}: ${commands} commands`);
+          }
+
+          // ✅ SESSION CLOSED
+          if (isClosed && !previousData.isClosed) {
+            io.emit('session_closed', { sessionId: sessionId });
+            console.log(`🔒 [CLOSED] ${sessionId}`);
+          }
+
+          knownSessions.set(sessionId, {
+            commands: commands,
+            status: isClosed ? 'closed' : 'active',
+            isClosed: isClosed
+          });
         }
       }
     }
@@ -1631,6 +1748,71 @@ async function broadcastNewSessions() {
 
   } catch (error) {
     console.error('❌ [LIVE] Error broadcasting sessions:', error.message);
+  }
+}
+
+
+async function broadcastThreatIntel() {
+  try {
+    // Top attackers
+    const topAttackersRes = await esClient.search({
+      index: process.env.ELASTICSEARCH_INDEX || 'cowrie-*',
+      size: 0,
+      body: {
+        query: { range: { '@timestamp': { gte: 'now-24h' } } },
+        aggs: {
+          top_ips: {
+            terms: { field: 'src_ip.keyword', size: 10 }
+          }
+        }
+      }
+    });
+
+    const topAttackers = (topAttackersRes.aggregations?.top_ips?.buckets || []).map(b => {
+      const geoData = getCountryFromIP(b.key);
+      return {
+        ip: String(b.key).slice(0, 45), // ✅ Sanitized
+        count: Math.max(0, b.doc_count),
+        country: String(geoData.country).slice(0, 100),
+        flag: String(geoData.flag).slice(0, 10)
+      };
+    });
+
+    // Common commands
+    const commandsRes = await esClient.search({
+      index: process.env.ELASTICSEARCH_INDEX || 'cowrie-*',
+      size: 0,
+      body: {
+        query: {
+          bool: {
+            must: [
+              { term: { 'eventid.keyword': 'cowrie.command.input' } },
+              { range: { '@timestamp': { gte: 'now-24h' } } }
+            ]
+          }
+        },
+        aggs: {
+          common_commands: {
+            terms: { field: 'input.keyword', size: 10 }
+          }
+        }
+      }
+    });
+
+    const commonCommands = (commandsRes.aggregations?.common_commands?.buckets || []).map(b => ({
+      cmd: String(b.key).replace(/[<>'"]/g, '').slice(0, 200), // ✅ Sanitized
+      count: Math.max(0, b.doc_count)
+    }));
+
+    io.emit('threat_intel_update', {
+      topAttackers: topAttackers,
+      commonCommands: commonCommands
+    });
+
+    console.log(`📊 [INTEL] ${topAttackers.length} attackers, ${commonCommands.length} commands`);
+
+  } catch (error) {
+    console.error('❌ [INTEL] Error:', error.message);
   }
 }
 
@@ -1652,8 +1834,10 @@ const startServer = async () => {
     monitorSessions();
     console.log('🔴 Starting real-time attack monitoring...');
     setInterval(broadcastNewSessions, 2000);
-    
-    console.log('✅ All systems operational!\n');
+   setInterval(broadcastThreatIntel, 30000); // Every 30 seconds
+   broadcastThreatIntel(); // ✅ Run once immediately on startup
+   console.log('📊 Threat intel monitoring started (30s interval)');
+   console.log('✅ All systems operational!\n');
     
     // ============================================
     // ✅ NEW: INITIALIZE NOTIFICATION SERVICE

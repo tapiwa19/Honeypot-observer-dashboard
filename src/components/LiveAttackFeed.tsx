@@ -18,24 +18,19 @@ interface AttackEntry {
   type: string;
   severity: string;
   details: string;
-  command?: string;
-  commandCount?: number; // ✅ Track number of commands
-  firstSeen?: string;
-  lastSeen?: string;
+  commands: string[];      // ✅ ALL commands as array
+  commandCount: number;
+  firstSeen: string;
+  lastSeen: string;
 }
 
 const getRiskColor = (severity: string) => {
   switch (severity.toLowerCase()) {
-    case "low":
-      return "#52B788";
-    case "medium":
-      return "#FFA500";
-    case "high":
-      return "#FF4D4D";
-    case "critical":
-      return "#FF0000";
-    default:
-      return "#38B6FF";
+    case "low":      return "#52B788";
+    case "medium":   return "#FFA500";
+    case "high":     return "#FF4D4D";
+    case "critical": return "#FF0000";
+    default:         return "#38B6FF";
   }
 };
 
@@ -50,78 +45,118 @@ export function LiveAttackFeed({
   const [replayingAttack, setReplayingAttack] = useState<AttackEntry | null>(null);
   const [liveIndicator, setLiveIndicator] = useState(false);
 
-  // ✅ Listen for new sessions via WebSocket
+  // ✅ Check if already connected when component mounts
   useEffect(() => {
     if (!socket) return;
 
+    if (socket.connected) {
+      setLiveIndicator(true);
+    }
+
     socket.on('connect', () => {
-      console.log('✅ [LiveFeed] WebSocket connected');
       setLiveIndicator(true);
     });
 
     socket.on('disconnect', () => {
-      console.log('⚠️ [LiveFeed] WebSocket disconnected');
       setLiveIndicator(false);
     });
 
-    // ✅ Add new session to feed
+    // ✅ New session - add or update in feed
     socket.on('new_session', (newSession: any) => {
-      console.log('🔴 [LiveFeed] New session detected:', newSession);
-      
-      const newAttack: AttackEntry = {
-        id: newSession.sessionId,
-        session: newSession.sessionId,
-        ip: newSession.ip,
-        country: newSession.countryName || 'Unknown',
-        flag: newSession.country,
-        timestamp: newSession.timestamp,
-        protocol: 'SSH',
-        status: 'Active',
-        type: newSession.risk >= 8 ? 'Critical Attack' : 
-              newSession.risk >= 6 ? 'High Risk' : 'Attack Detected',
-        severity: newSession.risk >= 8 ? 'critical' : 
-                  newSession.risk >= 6 ? 'high' : 
-                  newSession.risk >= 4 ? 'medium' : 'low',
-        details: `New attack from ${newSession.ip}`,
-        command: `Session started - ${newSession.commands} commands`,
-        commandCount: newSession.commands,
-        firstSeen: newSession.timestamp,
-        lastSeen: newSession.timestamp
-      };
+      setAttacks(prev => {
+        const existingIndex = prev.findIndex(a => a.session === newSession.sessionId);
+        
+        if (existingIndex >= 0) {
+          // Update existing session
+          const updated = [...prev];
+          updated[existingIndex] = {
+            ...updated[existingIndex],
+            commandCount: newSession.commands,
+            lastSeen: newSession.timestamp,
+            status: 'Active'
+          };
+          return updated;
+        } else {
+          // Add new session
+          const newAttack: AttackEntry = {
+            id: newSession.sessionId,
+            session: newSession.sessionId,
+            ip: newSession.ip,
+            country: newSession.countryName || 'Unknown',
+            flag: newSession.country,
+            timestamp: newSession.timestamp,
+            protocol: 'SSH',
+            status: 'Active',
+            type: newSession.risk >= 8 ? 'Critical Attack' : 
+                  newSession.risk >= 6 ? 'High Risk' : 'Attack Detected',
+            severity: newSession.risk >= 8 ? 'critical' : 
+                      newSession.risk >= 6 ? 'high' : 
+                      newSession.risk >= 4 ? 'medium' : 'low',
+            details: `Attack from ${newSession.ip}`,
+            commands: [],
+            commandCount: newSession.commands || 0,
+            firstSeen: newSession.timestamp,
+            lastSeen: newSession.timestamp
+          };
+          return [newAttack, ...prev.slice(0, 19)];
+        }
+      });
+    });
 
-      // Add to top of feed
-      setAttacks(prev => [newAttack, ...prev.slice(0, 19)]);
+    // ✅ Session updated - update command count
+    socket.on('session_updated', (updatedSession: any) => {
+      setAttacks(prev => prev.map(a => 
+        a.session === updatedSession.sessionId
+          ? { ...a, commandCount: updatedSession.commands, lastSeen: updatedSession.timestamp, status: 'Active' }
+          : a
+      ));
+    });
+
+    // ✅ Session closed - mark as ended
+    socket.on('session_closed', (data: { sessionId: string }) => {
+      setAttacks(prev => prev.map(a => 
+        a.session === data.sessionId ? { ...a, status: 'Ended' } : a
+      ));
     });
 
     return () => {
+      socket.off('connect');
+      socket.off('disconnect');
       socket.off('new_session');
+      socket.off('session_updated');
+      socket.off('session_closed');
     };
   }, [socket]);
 
-  // ✅ Fetch and GROUP attacks by session
+  // ✅ Fetch and GROUP all events by session
   const fetchAttacks = async () => {
     try {
       const response = await axios.get(`${API_BASE}/dashboard/attacks`);
       const now = Date.now();
 
-      // ✅ Group by session ID
       const sessionMap = new Map<string, AttackEntry>();
 
       response.data.forEach((attack: any) => {
-        const sessionId = attack.session || attack.ip; // Fallback to IP if no session
+        const sessionId = attack.session || attack.ip;
         
         if (sessionMap.has(sessionId)) {
-          // Update existing session
           const existing = sessionMap.get(sessionId)!;
-          existing.commandCount = (existing.commandCount || 0) + 1;
-          existing.lastSeen = attack.timestamp;
           
-          // Update status based on time
-          const lastSeenTime = new Date(existing.lastSeen!).getTime();
-          const minutesAgo = (now - lastSeenTime) / (1000 * 60);
-          existing.status = minutesAgo < 5 ? "Active" : "Ended";
+          // ✅ Add command to session's command list
+          if (attack.input) {
+            existing.commands.push(attack.input);
+          }
+          existing.commandCount = existing.commands.length;
+          existing.lastSeen = attack.timestamp;
+
+          // Update severity if more severe event found
+          if (attack.severity === 'critical') existing.severity = 'critical';
+          else if (attack.severity === 'high' && existing.severity !== 'critical') existing.severity = 'high';
+
+          const lastSeenTime = new Date(existing.lastSeen).getTime();
+          existing.status = (now - lastSeenTime) / (1000 * 60) < 5 ? "Active" : "Ended";
+
         } else {
-          // Create new session entry
           const attackTime = new Date(attack.timestamp).getTime();
           const minutesAgo = (now - attackTime) / (1000 * 60);
 
@@ -137,17 +172,16 @@ export function LiveAttackFeed({
             type: attack.type || 'Attack Detected',
             severity: attack.severity || 'medium',
             details: attack.details || `Attack from ${attack.ip}`,
-            command: attack.input || attack.details || "Session activity",
-            commandCount: 1,
+            commands: attack.input ? [attack.input] : [],
+            commandCount: attack.input ? 1 : 0,
             firstSeen: attack.timestamp,
             lastSeen: attack.timestamp
           });
         }
       });
 
-      // Convert to array and sort by most recent
       const groupedAttacks = Array.from(sessionMap.values())
-        .sort((a, b) => new Date(b.lastSeen!).getTime() - new Date(a.lastSeen!).getTime())
+        .sort((a, b) => new Date(b.lastSeen).getTime() - new Date(a.lastSeen).getTime())
         .slice(0, 20);
 
       setAttacks(groupedAttacks);
@@ -199,14 +233,11 @@ export function LiveAttackFeed({
             >
               <div className="flex items-start justify-between gap-3">
                 <div className="flex-1 min-w-0">
+                  {/* Header Row */}
                   <div className="flex items-center gap-2 mb-2 flex-wrap">
-                    <span className="font-mono text-[#38B6FF] text-sm font-bold">
-                      {attack.ip}
-                    </span>
-                    <span className="text-xl">{attack.flag || attack.countryCode}</span>
-                    <span className="text-gray-400 text-xs">
-                      {attack.protocol}
-                    </span>
+                    <span className="font-mono text-[#38B6FF] text-sm font-bold">{attack.ip}</span>
+                    <span className="text-xl">{attack.flag}</span>
+                    <span className="text-gray-400 text-xs">{attack.protocol}</span>
                     <span
                       className="text-xs px-2 py-0.5 rounded border"
                       style={{
@@ -217,20 +248,31 @@ export function LiveAttackFeed({
                     >
                       {attack.type}
                     </span>
-                    {/* ✅ Show command count */}
-                    {attack.commandCount && attack.commandCount > 1 && (
+                    {attack.commandCount > 0 && (
                       <span className="text-xs px-2 py-0.5 rounded bg-cyan-500/20 text-cyan-400 border border-cyan-500">
-                        {attack.commandCount} commands
+                        {attack.commandCount} cmd{attack.commandCount !== 1 ? 's' : ''}
                       </span>
                     )}
                   </div>
 
-                  <div className="font-mono text-gray-300 text-sm mb-2 truncate">
-                    {attack.command || attack.details}
+                  {/* ✅ Show ALL commands grouped in one session block */}
+                  <div className="font-mono text-sm mb-2 bg-black/30 rounded p-2 border border-gray-700">
+                    {attack.commands?.length > 0 ? (
+                      <div className="space-y-1 max-h-[80px] overflow-y-auto">
+                        {attack.commands.map((cmd, i) => (
+                          <div key={i} className="text-green-400">
+                            <span className="text-gray-500 text-xs">[{i + 1}]</span> $ {cmd}
+                          </div>
+                        ))}
+                      </div>
+                    ) : (
+                      <span className="text-gray-400">{attack.details}</span>
+                    )}
                   </div>
 
+                  {/* Footer Row */}
                   <div className="flex items-center gap-3 text-xs text-gray-400">
-                    <span>{new Date(attack.timestamp).toLocaleTimeString()}</span>
+                    <span>{new Date(attack.firstSeen).toLocaleTimeString()}</span>
                     {attack.status === "Active" ? (
                       <span className="flex items-center gap-1 text-[#10B981] font-semibold">
                         <span className="w-1.5 h-1.5 bg-[#10B981] rounded-full animate-pulse"></span>
@@ -239,19 +281,16 @@ export function LiveAttackFeed({
                     ) : (
                       <span className="text-gray-500">Ended</span>
                     )}
-                    {/* ✅ Show session duration */}
-                    {attack.firstSeen && attack.lastSeen && (
-                      <span className="text-gray-500">
-                        Duration: {Math.floor((new Date(attack.lastSeen).getTime() - new Date(attack.firstSeen).getTime()) / 1000)}s
-                      </span>
-                    )}
+                    <span className="text-gray-500">
+                      Duration: {Math.floor((new Date(attack.lastSeen).getTime() - new Date(attack.firstSeen).getTime()) / 1000)}s
+                    </span>
                   </div>
                 </div>
 
                 <button 
                   onClick={() => setReplayingAttack(attack)}
                   className="flex items-center gap-2 px-4 py-2 bg-cyan-500/20 text-cyan-400 rounded-lg hover:bg-cyan-500/30 transition-all text-sm border border-cyan-500 whitespace-nowrap"
-                  disabled={!attack.session} // ✅ Disable if no session
+                  disabled={!attack.session}
                   title={attack.session ? "Replay all commands from this session" : "No session data available"}
                 >
                   <Play className="w-4 h-4" />
@@ -263,7 +302,7 @@ export function LiveAttackFeed({
         )}
       </div>
 
-      {/* Footer Actions */}
+      {/* Footer */}
       <div className="p-4 border-t border-slate-500 flex items-center gap-3">
         {onNavigate && (
           <button
@@ -276,7 +315,7 @@ export function LiveAttackFeed({
         <button
           onClick={() => {
             const csv = attacks.map(a => 
-              `${a.ip},${a.country},${a.timestamp},${a.commandCount || 0},${a.severity}`
+              `${a.ip},${a.country},${a.timestamp},${a.commandCount},${a.severity}`
             ).join('\n');
             const blob = new Blob([`IP,Country,Timestamp,Commands,Severity\n${csv}`], { type: 'text/csv' });
             const url = URL.createObjectURL(blob);
@@ -292,7 +331,6 @@ export function LiveAttackFeed({
         </button>
       </div>
 
-      {/* Replay Modal */}
       {replayingAttack && (
         <ReplayModal attack={replayingAttack} onClose={() => setReplayingAttack(null)} />
       )}
@@ -300,7 +338,7 @@ export function LiveAttackFeed({
   );
 }
 
-// ✅ Updated Replay Modal - Shows ALL commands from session
+// ✅ Replay Modal - fetches ALL commands from backend
 function ReplayModal({ attack, onClose }: { attack: AttackEntry; onClose: () => void }) {
   const [commandIndex, setCommandIndex] = useState(0);
   const [isPlaying, setIsPlaying] = useState(true);
@@ -314,7 +352,7 @@ function ReplayModal({ attack, onClose }: { attack: AttackEntry; onClose: () => 
         setCommands([
           `$ ssh attacker@honeypot`,
           `Connected to ${attack.ip}`,
-          attack.command || attack.details || 'No commands recorded',
+          attack.details || 'No commands recorded',
           "$ exit",
           "Connection closed."
         ]);
@@ -323,47 +361,27 @@ function ReplayModal({ attack, onClose }: { attack: AttackEntry; onClose: () => 
       }
 
       try {
-        console.log(`🎬 [Replay] Fetching commands for session: ${attack.session}`);
-        
-        // ✅ Try to get ALL commands - backend should return all, but we'll verify
         const response = await axios.get(`${API_BASE}/sessions/${attack.session}/commands`);
         const sessionCommands = response.data.commands || [];
         
-        console.log(`✅ [Replay] Received ${sessionCommands.length} commands from backend`);
-        console.log(`📊 [Replay] Expected ~${attack.commandCount || 'unknown'} commands`);
-        
-        // ✅ Warning if we got fewer commands than expected
-        if (attack.commandCount && sessionCommands.length < attack.commandCount) {
-          console.warn(`⚠️ [Replay] Expected ${attack.commandCount} commands but only got ${sessionCommands.length}`);
-          console.warn(`⚠️ [Replay] Backend may be limiting results. Check Elasticsearch 'size' parameter.`);
-        }
-        
         if (sessionCommands.length > 0) {
-          const formattedCommands = [
+          setCommands([
             `$ ssh attacker@honeypot`,
             `Connected to ${attack.ip} (${attack.country})`,
-            `Last login: ${new Date(attack.timestamp).toLocaleString()}`,
-            `Session ID: ${attack.session}`,
-            attack.commandCount && sessionCommands.length < attack.commandCount 
-              ? `⚠️ Showing ${sessionCommands.length} of ${attack.commandCount} commands (backend limit)`
-              : `Total commands: ${sessionCommands.length}`,
+            `Session: ${attack.session}`,
             ``,
-            ...sessionCommands.map((cmd: any, index: number) => {
-              const cmdText = cmd.input || cmd.command || 'unknown command';
-              return `[${index + 1}/${sessionCommands.length}] $ ${cmdText}`;
-            }),
+            ...sessionCommands.map((cmd: any, i: number) => 
+              `[${i + 1}/${sessionCommands.length}] $ ${cmd.input || cmd.command || 'unknown'}`
+            ),
             ``,
             "$ exit",
             "Connection closed."
-          ];
-          
-          console.log(`📜 [Replay] Displaying ${formattedCommands.length} lines`);
-          setCommands(formattedCommands);
+          ]);
         } else {
           setCommands([
             `$ ssh attacker@honeypot`,
             `Connected to ${attack.ip}`,
-            attack.command || attack.details || 'Session established',
+            attack.details || 'Session established - no commands recorded',
             "$ exit",
             "Connection closed."
           ]);
@@ -374,7 +392,6 @@ function ReplayModal({ attack, onClose }: { attack: AttackEntry; onClose: () => 
           `$ ssh attacker@honeypot`,
           `Connected to ${attack.ip}`,
           `Error loading session commands`,
-          attack.command || attack.details || 'Session data unavailable',
           "$ exit"
         ]);
       } finally {
@@ -387,11 +404,9 @@ function ReplayModal({ attack, onClose }: { attack: AttackEntry; onClose: () => 
 
   useEffect(() => {
     if (!isPlaying || commandIndex >= commands.length || loading) return;
-
     const timer = setTimeout(() => {
-      setCommandIndex((prev) => Math.min(prev + 1, commands.length));
+      setCommandIndex(prev => Math.min(prev + 1, commands.length));
     }, 1000 / speed);
-
     return () => clearTimeout(timer);
   }, [commandIndex, isPlaying, speed, commands.length, loading]);
 
@@ -412,14 +427,11 @@ function ReplayModal({ attack, onClose }: { attack: AttackEntry; onClose: () => 
               <p className="text-gray-400 text-sm font-mono">
                 {attack.ip} • {attack.country}
                 {attack.session && <span className="text-[#00D9FF]"> • {attack.session}</span>}
-                {attack.commandCount && <span className="text-yellow-400"> • {attack.commandCount} commands</span>}
+                {attack.commandCount > 0 && <span className="text-yellow-400"> • {attack.commandCount} commands</span>}
               </p>
             </div>
           </div>
-          <button
-            onClick={onClose}
-            className="p-2 text-gray-400 hover:text-white hover:bg-gray-800 rounded-lg transition-colors"
-          >
+          <button onClick={onClose} className="p-2 text-gray-400 hover:text-white hover:bg-gray-800 rounded-lg transition-colors">
             <X className="w-5 h-5" />
           </button>
         </div>
@@ -435,15 +447,10 @@ function ReplayModal({ attack, onClose }: { attack: AttackEntry; onClose: () => 
                 <div
                   key={index}
                   className={`mb-2 ${
-                    cmd.startsWith("$")
-                      ? "text-green-400"
-                      : cmd.includes("Password") || cmd.includes("login") || cmd.includes("Session")
-                      ? "text-yellow-400"
-                      : cmd.includes("malicious") || cmd.includes("wget") || cmd.includes("curl") || cmd.includes("rm") || cmd.includes("chmod")
-                      ? "text-red-400"
-                      : cmd.includes("Error") || cmd.includes("closed")
-                      ? "text-gray-500"
-                      : "text-gray-300"
+                    cmd.startsWith("[") || cmd.startsWith("$") ? "text-green-400" :
+                    cmd.includes("Session") || cmd.includes("Connected") ? "text-yellow-400" :
+                    cmd.includes("closed") || cmd.includes("Error") ? "text-gray-500" :
+                    "text-gray-300"
                   }`}
                 >
                   {cmd}
@@ -476,15 +483,10 @@ function ReplayModal({ attack, onClose }: { attack: AttackEntry; onClose: () => 
               <option value={2}>2x</option>
               <option value={4}>4x</option>
             </select>
-            <span className="text-gray-400 text-sm">
-              {commandIndex + 1} / {commands.length}
-            </span>
+            <span className="text-gray-400 text-sm">{commandIndex + 1} / {commands.length}</span>
           </div>
           <button
-            onClick={() => {
-              setCommandIndex(0);
-              setIsPlaying(true);
-            }}
+            onClick={() => { setCommandIndex(0); setIsPlaying(true); }}
             className="px-4 py-2 bg-gray-800 text-white rounded-lg hover:bg-gray-700 transition-colors text-sm"
             disabled={loading}
           >

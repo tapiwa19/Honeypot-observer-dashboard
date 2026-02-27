@@ -1,9 +1,11 @@
 import { useState, useEffect } from 'react';
-import { X, Shield, Settings, Download, Check, AlertTriangle, Eye, Archive, Lightbulb, Clock, TrendingUp, Activity } from 'lucide-react';
+import { X, Shield, Settings, Download, Check, AlertTriangle, Eye, Archive, Lightbulb, Clock, TrendingUp, Activity, Wifi, WifiOff } from 'lucide-react';
 import axios from 'axios';
 import { motion, AnimatePresence } from 'framer-motion';
+import { io, Socket } from 'socket.io-client';
 
 const API_BASE = 'http://localhost:5001/api';
+const WS_URL = 'http://localhost:5001';
 
 // ============================================
 // TYPESCRIPT INTERFACES
@@ -26,6 +28,7 @@ interface Alert {
   archivedAt?: Date;
   commands?: string[];
   evidenceData?: any;
+  isNew?: boolean; // ✅ NEW: Flag for highlighting new real-time alerts
 }
 
 interface AlertRule {
@@ -204,9 +207,6 @@ const getPriorityColor = (priority: string) => {
   }
 };
 
-/**
- * Determines alert severity based on attack characteristics
- */
 const calculateSeverity = (attack: any): 'critical' | 'high' | 'medium' | 'low' => {
   if (attack.severity) {
     return attack.severity as 'critical' | 'high' | 'medium' | 'low';
@@ -214,23 +214,15 @@ const calculateSeverity = (attack: any): 'critical' | 'high' | 'medium' | 'low' 
   
   const attackType = attack.type?.toLowerCase() || '';
   
-  // CRITICAL: Most dangerous attacks
   if (attackType.includes('login.success')) return 'critical';
   if (attackType.includes('command.input') || attackType.includes('command') || attackType.includes('execution')) return 'critical';
   if (attackType.includes('file_download')) return 'critical';
-  
-  // HIGH: Serious threats
   if (attackType.includes('login.failed') || attackType.includes('brute')) return 'high';
-  
-  // MEDIUM: Notable activity
   if (attackType.includes('connection') || attackType.includes('session.connect')) return 'medium';
   
   return 'low';
 };
 
-/**
- * Determines alert type for solution matching
- */
 const determineAlertType = (attack: any): string => {
   const eventId = attack.type?.toLowerCase() || '';
   
@@ -242,9 +234,6 @@ const determineAlertType = (attack: any): string => {
   return 'default';
 };
 
-/**
- * Determines if attack is currently active (within last 5 minutes)
- */
 const isAttackActive = (attackTimestamp: string): boolean => {
   const now = new Date();
   const attackTime = new Date(attackTimestamp);
@@ -252,9 +241,6 @@ const isAttackActive = (attackTimestamp: string): boolean => {
   return minutesSinceAttack <= 5;
 };
 
-/**
- * Format time ago in human-readable format
- */
 const formatTimeAgo = (timestamp: string) => {
   if (!timestamp) return 'Unknown';
   const now = new Date();
@@ -267,9 +253,6 @@ const formatTimeAgo = (timestamp: string) => {
   return `${Math.floor(seconds / 86400)}d ago`;
 };
 
-/**
- * Get detailed alert title based on attack type
- */
 const getAlertTitle = (attack: any): string => {
   const eventId = attack.type?.toLowerCase() || '';
   
@@ -292,9 +275,6 @@ const getAlertTitle = (attack: any): string => {
   return 'Security Event Detected';
 };
 
-/**
- * Get detailed alert description
- */
 const getAlertDescription = (attack: any): string => {
   const eventId = attack.type?.toLowerCase() || '';
   const ip = attack.ip || 'unknown';
@@ -332,6 +312,11 @@ export default function Alerts() {
   const [showAllAlerts, setShowAllAlerts] = useState(false);
   const [currentSolution, setCurrentSolution] = useState<AttackSolution | null>(null);
   
+  // ✅ NEW: WebSocket state
+  const [socket, setSocket] = useState<Socket | null>(null);
+  const [wsConnected, setWsConnected] = useState(false);
+  const [lastAlertSound, setLastAlertSound] = useState(0);
+  
   const [stats, setStats] = useState({
     active: 0,
     resolved: 0,
@@ -366,9 +351,173 @@ export default function Alerts() {
     }
   ]);
 
-  /**
-   * Fetch alerts from backend and convert to proper format
-   */
+  // ✅ NEW: Play alert sound (throttled)
+  const playAlertSound = () => {
+    const now = Date.now();
+    if (now - lastAlertSound < 3000) return;
+    
+    setLastAlertSound(now);
+    
+    try {
+      const audioContext = new (window.AudioContext || (window as any).webkitAudioContext)();
+      const oscillator = audioContext.createOscillator();
+      const gainNode = audioContext.createGain();
+      
+      oscillator.connect(gainNode);
+      gainNode.connect(audioContext.destination);
+      
+      oscillator.frequency.value = 800;
+      oscillator.type = 'sine';
+      
+      gainNode.gain.setValueAtTime(0.3, audioContext.currentTime);
+      gainNode.gain.exponentialRampToValueAtTime(0.01, audioContext.currentTime + 0.5);
+      
+      oscillator.start(audioContext.currentTime);
+      oscillator.stop(audioContext.currentTime + 0.5);
+    } catch (err) {
+      console.log('Audio playback not supported');
+    }
+  };
+
+  // ✅ NEW: Show browser notification
+  const showBrowserNotification = (alert: Alert) => {
+    if ('Notification' in window && Notification.permission === 'granted') {
+      new Notification(alert.title, {
+        body: alert.description,
+        icon: alert.severity === 'critical' ? '🚨' : '⚠️',
+        badge: '🔔'
+      });
+    }
+  };
+
+  // ✅ NEW: Add real-time alert from WebSocket
+  const addRealtimeAlert = (alertData: Partial<Alert>) => {
+    const newAlert: Alert = {
+      id: alertData.id || `realtime-${Date.now()}`,
+      title: alertData.title || 'Real-time Alert',
+      description: alertData.description || 'Security event detected',
+      severity: alertData.severity || 'medium',
+      sourceIp: alertData.sourceIp || 'unknown',
+      country: alertData.country || 'Unknown',
+      flag: alertData.flag || '🌍',
+      timestamp: 'Just now',
+      status: 'active',
+      type: alertData.type || 'connection',
+      attackTime: new Date(),
+      isNew: true
+    };
+
+    setAlerts(prev => [newAlert, ...prev]);
+
+    setStats(prev => ({
+      ...prev,
+      active: prev.active + 1,
+      critical: newAlert.severity === 'critical' ? prev.critical + 1 : prev.critical
+    }));
+
+    if (newAlert.severity === 'critical') {
+      playAlertSound();
+      showBrowserNotification(newAlert);
+    }
+
+    setTimeout(() => {
+      setAlerts(prev => prev.map(a => 
+        a.id === newAlert.id ? { ...a, isNew: false } : a
+      ));
+    }, 3000);
+
+    console.log('🔴 [REALTIME] New alert added:', newAlert);
+  };
+
+  // ✅ NEW: WebSocket connection
+  useEffect(() => {
+    console.log('🔌 [WEBSOCKET] Initializing...');
+    
+    const ws = io(WS_URL, {
+      transports: ['websocket', 'polling'],
+      reconnection: true,
+      reconnectionAttempts: 5,
+      reconnectionDelay: 1000
+    });
+
+    ws.on('connect', () => {
+      console.log('✅ [WEBSOCKET] Connected');
+      setWsConnected(true);
+    });
+
+    ws.on('disconnect', () => {
+      console.log('❌ [WEBSOCKET] Disconnected');
+      setWsConnected(false);
+    });
+
+    ws.on('reconnect', (attemptNumber) => {
+      console.log(`🔄 [WEBSOCKET] Reconnected after ${attemptNumber} attempts`);
+      setWsConnected(true);
+    });
+
+    ws.on('new_session', (sessionData: any) => {
+      console.log('🚨 [WEBSOCKET] New session:', sessionData);
+      
+      if (sessionData.risk >= 7) {
+        const severity = sessionData.risk >= 9 ? 'critical' : 'high';
+        
+        addRealtimeAlert({
+          id: `session-${sessionData.sessionId}`,
+          severity,
+          title: `${severity === 'critical' ? '🚨 CRITICAL' : '⚠️ HIGH RISK'} Attack Session`,
+          description: `New SSH attack from ${sessionData.ip} (${sessionData.countryName || sessionData.country}) - Risk: ${sessionData.risk}/10`,
+          sourceIp: sessionData.ip,
+          country: sessionData.countryName || sessionData.country,
+          flag: sessionData.country,
+          type: 'command_execution',
+          sessionId: sessionData.sessionId
+        });
+      }
+    });
+
+    ws.on('new_attack', (attackData: any) => {
+      console.log('🔥 [WEBSOCKET] New attack:', attackData);
+      
+      const isCritical = attackData.type === 'cowrie.login.success' || 
+                        attackData.type === 'cowrie.session.file_download' ||
+                        attackData.type === 'cowrie.command.input';
+      
+      if (isCritical) {
+        const severity = (attackData.type === 'cowrie.login.success' || 
+                         attackData.type === 'cowrie.session.file_download') 
+                         ? 'critical' : 'high';
+        
+        addRealtimeAlert({
+          severity,
+          title: getAlertTitle(attackData),
+          description: getAlertDescription(attackData),
+          sourceIp: attackData.ip,
+          country: attackData.country,
+          flag: attackData.flag,
+          type: determineAlertType(attackData)
+        });
+      }
+    });
+
+    setSocket(ws);
+
+    return () => {
+      console.log('🔌 [WEBSOCKET] Cleaning up...');
+      ws.disconnect();
+    };
+  }, []);
+
+  // ✅ NEW: Request notification permission
+  useEffect(() => {
+    if ('Notification' in window && Notification.permission === 'default') {
+      Notification.requestPermission().then(permission => {
+        if (permission === 'granted') {
+          console.log('✅ Browser notifications enabled');
+        }
+      });
+    }
+  }, []);
+
   const fetchAlerts = async () => {
     try {
       setError(null);
@@ -401,7 +550,6 @@ export default function Alerts() {
         };
       });
       
-      // Sort: CRITICAL first, then ACTIVE, then by time
       convertedAlerts.sort((a, b) => {
         if (a.severity === 'critical' && b.severity !== 'critical') return -1;
         if (a.severity !== 'critical' && b.severity === 'critical') return 1;
@@ -412,7 +560,6 @@ export default function Alerts() {
       
       setAlerts(convertedAlerts);
       
-      // Calculate real statistics
       const now = Date.now();
       const todayStart = new Date();
       todayStart.setHours(0, 0, 0, 0);
@@ -424,7 +571,6 @@ export default function Alerts() {
       });
       const criticalAlerts = convertedAlerts.filter(a => a.severity === 'critical');
       
-      // Calculate average response time (for resolved alerts)
       let totalResponseSeconds = 0;
       let resolvedCount = 0;
       
@@ -452,9 +598,6 @@ export default function Alerts() {
     }
   };
 
-  /**
-   * Fetch session commands for evidence
-   */
   const fetchSessionCommands = async (sessionId: string) => {
     try {
       const response = await axios.get(`${API_BASE}/sessions/${sessionId}/commands`);
@@ -465,9 +608,6 @@ export default function Alerts() {
     }
   };
 
-  /**
-   * Mark alert as resolved
-   */
   const handleMarkResolved = async (alertId: string) => {
     const alert = alerts.find(a => a.id === alertId);
     if (!alert) return;
@@ -482,7 +622,6 @@ export default function Alerts() {
     
     setAlerts(alerts.map(a => a.id === alertId ? updatedAlert : a));
     
-    // Recalculate stats
     const activeCount = alerts.filter(a => a.id !== alertId && a.status === 'active').length;
     const resolvedCount = alerts.filter(a => a.id === alertId || a.status === 'resolved').length;
     
@@ -493,9 +632,6 @@ export default function Alerts() {
     }));
   };
 
-  /**
-   * Archive alert
-   */
   const handleArchive = async (alertId: string) => {
     const alert = alerts.find(a => a.id === alertId);
     if (!alert) return;
@@ -509,20 +645,13 @@ export default function Alerts() {
     setAlerts(alerts.map(a => a.id === alertId ? updatedAlert : a));
   };
 
-  /**
-   * View solution for specific alert
-   */
   const handleViewSolution = (alert: Alert) => {
     const solution = ATTACK_SOLUTIONS[alert.type] || ATTACK_SOLUTIONS['default'];
     setCurrentSolution(solution);
     setShowSolution(true);
   };
 
-  /**
-   * Investigate alert (open modal with full details)
-   */
   const handleInvestigate = async (alert: Alert) => {
-    // Fetch commands if session ID exists
     if (alert.sessionId) {
       const commands = await fetchSessionCommands(alert.sessionId);
       alert.commands = commands.map((c: any) => c.input || c.command);
@@ -599,8 +728,7 @@ export default function Alerts() {
   // Effects
   useEffect(() => {
     fetchAlerts();
-    const interval = setInterval(fetchAlerts, 10000);
-    return () => clearInterval(interval);
+    // ✅ REMOVED polling - WebSocket handles real-time updates now!
   }, []);
 
   // Computed Values
@@ -619,7 +747,21 @@ export default function Alerts() {
         {/* Header Section */}
         <div className="flex items-center justify-between mb-6">
           <div>
-            <h1 className="text-3xl font-bold text-white mb-2">Alert Management Center</h1>
+            <h1 className="text-3xl font-bold text-white mb-2 flex items-center gap-3">
+              Alert Management Center
+              {/* ✅ NEW: WebSocket status indicator */}
+              {wsConnected ? (
+                <span className="flex items-center gap-2 text-sm font-normal text-green-400 bg-green-900/30 px-3 py-1 rounded-full border border-green-500/30">
+                  <Wifi className="w-4 h-4 animate-pulse" />
+                  Live
+                </span>
+              ) : (
+                <span className="flex items-center gap-2 text-sm font-normal text-red-400 bg-red-900/30 px-3 py-1 rounded-full border border-red-500/30">
+                  <WifiOff className="w-4 h-4" />
+                  Offline
+                </span>
+              )}
+            </h1>
             <p className="text-gray-400">Monitor and respond to security alerts in real-time</p>
           </div>
           
@@ -804,13 +946,16 @@ export default function Alerts() {
                   </div>
                 ) : (
                   displayedAlerts.map((alert) => (
-                    <div
+                    <motion.div
                       key={alert.id}
+                      initial={alert.isNew ? { x: -20, opacity: 0, scale: 0.95 } : false}
+                      animate={alert.isNew ? { x: 0, opacity: 1, scale: 1 } : false}
+                      transition={{ duration: 0.3 }}
                       className={`bg-gray-900/60 rounded-lg border p-4 hover:border-[#00D9FF] hover:shadow-lg hover:shadow-[#00D9FF]/20 transition-all ${
                         alert.severity === 'critical' 
                           ? 'border-red-500 shadow-lg shadow-red-500/20' 
                           : 'border-gray-700'
-                      }`}
+                      } ${alert.isNew ? 'ring-2 ring-[#00D9FF] ring-opacity-50' : ''}`}
                     >
                       <div className="flex items-start gap-3 mb-3">
                         <input
@@ -825,7 +970,15 @@ export default function Alerts() {
                         </div>
                         <div className="flex-1 min-w-0">
                           <div className="flex items-center justify-between mb-1">
-                            <h3 className="text-white font-semibold">{alert.title}</h3>
+                            <h3 className="text-white font-semibold flex items-center gap-2">
+                              {alert.title}
+                              {/* ✅ NEW: Badge for new alerts */}
+                              {alert.isNew && (
+                                <span className="px-2 py-0.5 bg-[#00D9FF] text-white text-xs rounded-full animate-pulse">
+                                  NEW
+                                </span>
+                              )}
+                            </h3>
                             <span className="text-gray-500 text-xs">{alert.timestamp}</span>
                           </div>
                           <p className="text-gray-400 text-sm mb-2">{alert.description}</p>
@@ -892,7 +1045,7 @@ export default function Alerts() {
                           </button>
                         )}
                       </div>
-                    </div>
+                    </motion.div>
                   ))
                 )}
               </div>
@@ -1022,6 +1175,14 @@ export default function Alerts() {
                       : 'N/A'}
                   </span>
                 </div>
+                {/* ✅ NEW: WebSocket connection status */}
+                <div className="flex justify-between items-center pt-2 border-t border-blue-700">
+                  <span className="text-gray-300">Connection:</span>
+                  <span className={`font-bold flex items-center gap-1 ${wsConnected ? 'text-green-400' : 'text-red-400'}`}>
+                    {wsConnected ? <Wifi className="w-3 h-3" /> : <WifiOff className="w-3 h-3" />}
+                    {wsConnected ? 'Live' : 'Offline'}
+                  </span>
+                </div>
               </div>
             </div>
           </div>
@@ -1059,8 +1220,11 @@ export default function Alerts() {
   );
 }
 
+// Modal components remain EXACTLY the same as your original...
+// (Copy SolutionModal, InvestigationModal, and RuleConfigModal from document #4)
+
 // ============================================
-// MODAL COMPONENTS
+// MODAL COMPONENTS (from your original code)
 // ============================================
 
 function SolutionModal({ solution, onClose }: { solution: AttackSolution; onClose: () => void }) {

@@ -3,7 +3,7 @@ import { Sidebar } from './components/layout/Sidebar';
 import { TopBar } from './components/layout/TopBar';
 import { Dashboard } from './pages/Dashboard';
 import { LiveSessions } from './pages/LiveSessions';
-import { Login } from './pages/login';  // ✅ NEW: Import Login page
+import { Login } from './pages/login';  
 import { Register } from './pages/Register';
 
 // Lazy load heavy pages for better performance
@@ -86,7 +86,7 @@ export default function App() {
   return <Login onLoginSuccess={handleLoginSuccess} onShowRegister={() => setShowRegister(true)} />;
 }
 
-  // ✅ MODIFIED: Only show settings to admin users
+  // Only show settings to admin users
   const shouldShowSettings = currentUser?.role === 'admin';
 
   return (
