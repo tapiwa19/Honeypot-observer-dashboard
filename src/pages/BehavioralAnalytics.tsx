@@ -13,8 +13,6 @@ import {
   PieChart,
   TrendingUp,
   ChevronRight,
-  Clock,
-  Zap,
   Activity,
   MapPin,
   Terminal,
@@ -92,7 +90,7 @@ export default function BehavioralAnalytics() {
   const [mitreTactics, setMitreTactics] = useState<MITRETactic[]>([]);
   const [loading, setLoading] = useState(true);
   const [timelineData, setTimelineData] = useState<any[]>([]);
-  const [liveSessions, setLiveSessions] = useState<any[]>([]);
+  const [_liveSessions, setLiveSessions] = useState<any[]>([]);
   
   const [selectedPattern, setSelectedPattern] = useState<Pattern | null>(null);
   const [selectedProfile, setSelectedProfile] = useState<AttackerProfile | null>(null);

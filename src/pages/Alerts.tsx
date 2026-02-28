@@ -313,7 +313,7 @@ export default function Alerts() {
   const [currentSolution, setCurrentSolution] = useState<AttackSolution | null>(null);
   
   // ✅ NEW: WebSocket state
-  const [socket, setSocket] = useState<Socket | null>(null);
+  const [_socket, setSocket] = useState<Socket | null>(null);
   const [wsConnected, setWsConnected] = useState(false);
   const [lastAlertSound, setLastAlertSound] = useState(0);
   
