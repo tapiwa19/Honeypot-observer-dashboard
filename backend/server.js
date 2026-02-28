@@ -1905,7 +1905,7 @@ const startServer = async () => {
     console.error('⚠️  Server will continue but ES features will be unavailable');
   }
 
-  httpServer.listen(PORT, () => {
+  httpServer.listen(PORT, '0.0.0.0', () => {
     console.log('🚀 Honeypot Backend Server Started!');
     console.log(`📡 API: http://localhost:${PORT}`);
     console.log(`🔌 WebSocket: ws://localhost:${PORT}`);
