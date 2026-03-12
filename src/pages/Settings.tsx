@@ -1,5 +1,6 @@
 import { UsersManagement } from '../components/UsersManagement';
-import { NotificationsTab } from '../components/NotificationsTab'; 
+import { NotificationsTab } from '../components/NotificationsTab';
+import { AlertRules } from '../components/AlertRules';
 import { useState, } from 'react';
 import { 
   Settings as SettingsIcon, 
@@ -10,6 +11,7 @@ import {
   Save,
   CheckCircle,
   AlertCircle,
+  AlertTriangle,
   RefreshCw,
   Trash2,
   Download,
@@ -24,7 +26,7 @@ import {
 } from 'lucide-react';
 
 export default function Settings() {
-  const [activeTab, setActiveTab] = useState<'general' | 'users' | 'cowrie' | 'alerts' | 'notifications' | 'integrations' | 'backup'>('general');
+  const [activeTab, setActiveTab] = useState<'general' | 'users' | 'cowrie' | 'alerts' | 'notifications' | 'integrations' | 'backup' | 'rules'>('general');
   const [showToast, setShowToast] = useState(false);
   const [toastMessage, setToastMessage] = useState('');
   const [toastType, setToastType] = useState<'success' | 'error'>('success');
@@ -72,11 +74,24 @@ export default function Settings() {
   // Backup State
   const [autoBackup, setAutoBackup] = useState(true);
   const [backupFrequency, setBackupFrequency] = useState('daily');
-  const [backupHistory] = useState([
-    { id: 1, date: '2025-01-27 14:30', size: '245 MB', status: 'success' },
-    { id: 2, date: '2025-01-26 14:30', size: '238 MB', status: 'success' },
-    { id: 3, date: '2025-01-25 14:30', size: '232 MB', status: 'success' }
-  ]);
+  const [backupHistory] = useState(() => {
+    // Generate dynamic dates based on current date
+    const today = new Date();
+    const formatDate = (d: Date) => {
+      const date = String(d.getDate()).padStart(2, '0');
+      const month = String(d.getMonth() + 1).padStart(2, '0');
+      const year = d.getFullYear();
+      const hours = String(d.getHours()).padStart(2, '0');
+      const mins = String(d.getMinutes()).padStart(2, '0');
+      return `${year}-${month}-${date} ${hours}:${mins}`;
+    };
+    
+    return [
+      { id: 1, date: formatDate(new Date(today.getTime())), size: '245 MB', status: 'success' },
+      { id: 2, date: formatDate(new Date(today.getTime() - 86400000)), size: '238 MB', status: 'success' },
+      { id: 3, date: formatDate(new Date(today.getTime() - 172800000)), size: '232 MB', status: 'success' }
+    ];
+  });
   
   // Security Settings
   const [currentPassword, setCurrentPassword] = useState('');
@@ -247,7 +262,7 @@ export default function Settings() {
       {/* Tabs */}
       <div className="bg-gray-800/90 rounded-xl shadow-lg border border-gray-700">
         <div className="border-b border-gray-700 px-6 py-3 flex gap-2 overflow-x-auto">
-         {(['general', 'users', 'cowrie', 'alerts', 'notifications', 'integrations', 'backup'] as const).map(tab => (
+         {(['general', 'users', 'cowrie', 'alerts', 'notifications', 'integrations', 'rules', 'backup'] as const).map(tab => (
             <button
               key={tab}
               onClick={() => setActiveTab(tab)}
@@ -263,6 +278,7 @@ export default function Settings() {
               {tab === 'alerts' && <Bell className="w-4 h-4 inline mr-2" />}
               {tab === 'notifications' && <Bell className="w-4 h-4 inline mr-2" />}
               {tab === 'integrations' && <Database className="w-4 h-4 inline mr-2" />}
+              {tab === 'rules' && <AlertTriangle className="w-4 h-4 inline mr-2" />}
               {tab === 'backup' && <Download className="w-4 h-4 inline mr-2" />}
               {tab.charAt(0).toUpperCase() + tab.slice(1)}
             </button>
@@ -541,6 +557,11 @@ export default function Settings() {
               </div>
             </div>
           )}
+          {/* Alert Rules Tab */}
+          {activeTab === 'rules' && (
+            <AlertRules />
+          )}
+
           {/* Notifications Tab */}
            {activeTab === 'notifications' && (
             <NotificationsTab />

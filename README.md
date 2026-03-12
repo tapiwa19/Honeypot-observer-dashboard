@@ -74,6 +74,14 @@ npm install
 npm run dev
 ```
 
+> **Tip:** the frontend reads API/socket endpoints from Vite environment variables.
+> Create a `.env` file in the repo root with values such as:
+> ```env
+> VITE_API_URL=http://localhost:5001/api
+> VITE_SOCKET_URL=http://localhost:5001
+> ```
+> That way the client will connect correctly in different environments.
+
 4. Open browser to `http://localhost:3000`
 
 ### Build for Production

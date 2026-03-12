@@ -19,8 +19,6 @@ import {
 } from 'lucide-react';
 import axios from 'axios';
 
-const API_BASE = 'http://localhost:5001/api';
-
 export function NotificationsTab() {
   const [loading, setLoading] = useState(false);
   const [activeSubTab, setActiveSubTab] = useState<'email' | 'sms' | 'phone' | 'slack'>('email');
@@ -61,7 +59,7 @@ export function NotificationsTab() {
   const loadConfig = async () => {
     try {
       const token = localStorage.getItem('token');
-      const response = await axios.get(`${API_BASE}/notifications/config`, {
+      const response = await axios.get(`/notifications/config`, {
         headers: { Authorization: `Bearer ${token}` }
       });
       
@@ -104,7 +102,7 @@ export function NotificationsTab() {
     try {
       const token = localStorage.getItem('token');
       const response = await axios.post(
-        `${API_BASE}/notifications/config/email`,
+        `/notifications/config/email`,
         {
           smtpHost,
           smtpPort,
@@ -135,7 +133,7 @@ export function NotificationsTab() {
     try {
       const token = localStorage.getItem('token');
       const response = await axios.post(
-        `${API_BASE}/notifications/config/twilio`,
+        `/notifications/config/twilio`,
         {
           accountSid: twilioAccountSid,
           authToken: twilioAuthToken,
@@ -168,7 +166,7 @@ export function NotificationsTab() {
     try {
       const token = localStorage.getItem('token');
       const response = await axios.post(
-        `${API_BASE}/notifications/config/slack`,
+        `/notifications/config/slack`,
         { webhookUrl: slackWebhook },
         { headers: { Authorization: `Bearer ${token}` } }
       );
@@ -192,7 +190,7 @@ export function NotificationsTab() {
     try {
       const token = localStorage.getItem('token');
       const response = await axios.post(
-        `${API_BASE}/notifications/test/${channel}`,
+        `/notifications/test/${channel}`,
         {},
         { headers: { Authorization: `Bearer ${token}` } }
       );

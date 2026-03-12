@@ -1,5 +1,5 @@
 // ============================================
-// HONEYPOT BACKEND SERVER - WITH NOTIFICATIONS
+// HONEYPOT BACKEND SERVER - Node.js + Express + Elasticsearch
 // ============================================
 import express from 'express';
 import cors from 'cors';
@@ -13,9 +13,11 @@ import geoip from 'geoip-lite';
 import connectDB from './config/database.js';
 import { authRouter, authenticateToken, requireAdmin } from './auth.js';
 
-// ✅ NEW: Import notification routes and service
+//  Import notification routes and service
 import notificationRouter from './routes/notifications.js';
 import notificationService from './services/notificationService.js';
+import alertRulesRouter from './routes/alertRules.js';
+import alertRulesEngine from './services/alertRulesEngine.js';
 
 dotenv.config();
 
@@ -40,6 +42,19 @@ app.use(cors({
 }));
 app.use(express.json());
 
+// helper utilities
+function extractAggs(response) {
+  return response.body?.aggregations || response.aggregations || {};
+}
+
+function isValidSessionId(id) {
+  return typeof id === 'string' && /^[a-zA-Z0-9\-]+$/.test(id);
+}
+
+function isValidRange(r) {
+  return r === 'all' || /^now-\d+[dh]$/.test(r);
+}
+
 app.use((req, res, next) => {
   const ip = req.ip || req.connection.remoteAddress;
   
@@ -58,6 +73,15 @@ app.use('/api/auth', authRouter);
 
 // ✅ NEW: Register notification routes
 app.use('/api/notifications', notificationRouter);
+
+// ✅ NEW: Register alert rules routes
+app.use('/api/alerts', alertRulesRouter);
+
+// ✅ FIXED: Only protect sensitive routes that modify data or require admin access
+// Read-only analytics/data endpoints (dashboard, analytics, sessions, credentials) are PUBLIC
+// IMPORTANT: Define public endpoints BEFORE protected ones so Express matches them first
+app.use('/api/admin', authenticateToken, requireAdmin);
+app.use('/api/users', authenticateToken, requireAdmin);
 
 // Elasticsearch Client
 const esClient = new Client({
@@ -101,40 +125,57 @@ function getCountryFromIP(ip) {
   };
 }
 
-// Background task to monitor sessions and mark as closed
+// Background task to monitor sessions: add new ones and mark closed
 async function monitorSessions() {
   try {
-    const response = await esClient.search({
-      index: process.env.ELASTICSEARCH_INDEX || 'cowrie-*',
+    // 1. look for recently closed sessions and remove them
+    const closedResp = await esClient.search({
+      index: process.env.ELASTICSEARCH_INDEX || '.ds-cowrie-*',
       size: 1000,
       body: {
         query: {
           bool: {
             must: [
-              {
-                term: {
-                  'eventid.keyword': 'cowrie.session.closed'
-                }
-              },
-              {
-                range: {
-                  '@timestamp': {
-                    gte: 'now-10m'
-                  }
-                }
-              }
+              { term: { 'eventid': 'cowrie.session.closed' } },
+              { range: { '@timestamp': { gte: 'now-10m' } } }
             ]
           }
         }
       }
     });
 
-    response.hits.hits.forEach(hit => {
+    closedResp.hits.hits.forEach(hit => {
       const sessionId = hit._source.session;
       if (activeSessions.has(sessionId)) {
         activeSessions.delete(sessionId);
         sessionStartTimes.delete(sessionId);
         console.log(`❌ Session ${sessionId} marked as closed`);
+      }
+    });
+
+    // 2. also fetch any new connects to keep activeSessions up to date
+    const openResp = await esClient.search({
+      index: process.env.ELASTICSEARCH_INDEX || '.ds-cowrie-*',
+      size: 1000,
+      body: {
+        query: {
+          bool: {
+            must: [
+              { term: { 'eventid': 'cowrie.session.connect' } },
+              { range: { '@timestamp': { gte: 'now-10m' } } }
+            ]
+          }
+        }
+      }
+    });
+
+    openResp.hits.hits.forEach(hit => {
+      const src = hit._source;
+      const sessionId = src.session;
+      if (sessionId && !activeSessions.has(sessionId)) {
+        activeSessions.set(sessionId, src);
+        sessionStartTimes.set(sessionId, src['@timestamp']);
+        console.log(`✅ Session ${sessionId} added to activeSessions`);
       }
     });
   } catch (error) {
@@ -172,34 +213,47 @@ app.get('/api/dashboard/stats', async (req, res) => {
     const todayStart = new Date();
     todayStart.setHours(0, 0, 0, 0);
 
+    // Count total attacks in last 24h
     const totalResponse = await esClient.count({
-  index: process.env.ELASTICSEARCH_INDEX || 'cowrie-*',
-  body: {
-    query: {
-      range: {
-        '@timestamp': {
-          gte: 'now-24h'
+      index: process.env.ELASTICSEARCH_INDEX || '.ds-cowrie-*',
+      body: {
+        query: {
+          range: {
+            '@timestamp': { gte: 'now-24h' }
+          }
+        }
+      }
+    });
+
+    // Count attacks in previous 24h window for % change
+    const yesterdayResponse = await esClient.count({
+      index: process.env.ELASTICSEARCH_INDEX || '.ds-cowrie-*',
+      body: {
+        query: {
+          range: {
+            '@timestamp': {
+              gte: 'now-48h',
+              lt: 'now-24h'
             }
           }
         }
       }
     });
 
+    // Count unique countries from unique IPs in last 24h
     const countriesResponse = await esClient.search({
-      index: process.env.ELASTICSEARCH_INDEX || 'cowrie-*',
+      index: process.env.ELASTICSEARCH_INDEX || '.ds-cowrie-*',
       size: 0,
       body: {
         query: {
           range: {
-            '@timestamp': {
-              gte: 'now-24h'
-            }
+            '@timestamp': { gte: 'now-24h' }
           }
         },
         aggs: {
           unique_ips: {
             terms: {
-              field: 'src_ip.keyword',
+              field: 'src_ip',
               size: 1000
             }
           }
@@ -207,31 +261,73 @@ app.get('/api/dashboard/stats', async (req, res) => {
       }
     });
 
+    
+
+    // ✅ FIX 1: Use extractAggs() helper to handle both ES client response formats
+    const aggs = extractAggs(countriesResponse);
     const uniqueCountries = new Set();
-    countriesResponse.aggregations?.unique_ips?.buckets.forEach(bucket => {
+    (aggs.unique_ips?.buckets || []).forEach(bucket => {
       const geoData = getCountryFromIP(bucket.key);
       uniqueCountries.add(geoData.country);
     });
 
-    const activeSessionsRes = await esClient.search({
-  index: process.env.ELASTICSEARCH_INDEX || 'cowrie-*',
+    // Count sessions that CONNECTED in last 1h
+const connectRes = await esClient.search({
+  index: process.env.ELASTICSEARCH_INDEX || '.ds-cowrie-*',
   size: 0,
   body: {
     query: {
       bool: {
-        must: [{ range: { '@timestamp': { gte: 'now-10m' } } }],
-        must_not: [{ term: { 'eventid.keyword': 'cowrie.session.closed' } }]
+        must: [
+          { range: { '@timestamp': { gte: 'now-1h' } } },
+          { term: { 'eventid': 'cowrie.session.connect' } }
+        ]
       }
     },
     aggs: {
-      active: { cardinality: { field: 'session.keyword' } }
+      sessions: { cardinality: { field: 'session' } }
     }
   }
 });
-const activeSessionsCount = activeSessionsRes.aggregations?.active?.value || 0;
+
+// Count sessions that CLOSED in last 1h
+const closedRes = await esClient.search({
+  index: process.env.ELASTICSEARCH_INDEX || '.ds-cowrie-*',
+  size: 0,
+  body: {
+    query: {
+      bool: {
+        must: [
+          { range: { '@timestamp': { gte: 'now-1h' } } },
+          { term: { 'eventid': 'cowrie.session.closed' } }
+        ]
+      }
+    },
+    aggs: {
+      sessions: { cardinality: { field: 'session' } }
+    }
+  }
+});
+
+const connectAggs = extractAggs(connectRes);
+const closedAggs = extractAggs(closedRes);
+const connectedCount = connectAggs.sessions?.value || 0;
+const closedCount = closedAggs.sessions?.value || 0;
+
+// Active = connected minus closed (minimum 0)
+const activeSessionsCount = Math.max(0, connectedCount - closedCount);
+
+    // Calculate % change vs yesterday
+    const prevCount = yesterdayResponse.count || 0;
+    const changePercent = prevCount > 0
+      ? Math.round(((totalResponse.count - prevCount) / prevCount) * 100)
+      : 0;
+
+    console.log(`📊 [STATS] Total: ${totalResponse.count}, Sessions(1h): ${activeSessionsCount}, Countries: ${uniqueCountries.size}`);
 
     res.json({
       totalAttacks: totalResponse.count,
+      changePercent,
       activeSessions: activeSessionsCount,
       threatLevel: totalResponse.count > 200 ? 'HIGH' : totalResponse.count > 50 ? 'MEDIUM' : 'LOW',
       countriesDetected: uniqueCountries.size
@@ -275,7 +371,7 @@ app.get('/api/dashboard/attacks', async (req, res) => {
     }
     
     const response = await esClient.search({
-      index: process.env.ELASTICSEARCH_INDEX || 'cowrie-*',
+      index: process.env.ELASTICSEARCH_INDEX || '.ds-cowrie-*',
       body: queryBody
     });
 
@@ -348,50 +444,75 @@ app.get('/api/sessions/live', async (req, res) => {
 
     console.log(`   Time filter: ${esRange || 'none'}`);
 
-    // ✅ STRATEGY: Get all events, then group by session in JavaScript
-    // This avoids aggregation issues with .keyword fields
+    // ✅ STRATEGY: pull a recent slice of events and then group them in JS
     
-    const queryBody = esRange ? {
-      query: {
-        range: {
-          '@timestamp': { gte: esRange }
+    const queryBody = esRange
+      ? {
+          query: {
+            range: {
+              '@timestamp': { gte: esRange }
+            }
+          },
+          sort: [{ '@timestamp': { order: 'desc' } }],
+          size: 10000 // grab most recent 10k events; warn if this is reached
         }
-      },
-      sort: [{ '@timestamp': { order: 'asc' } }],
-      size: 10000 // Get all recent events
-    } : {
-      sort: [{ '@timestamp': { order: 'asc' } }],
-      size: 10000
-    };
+      : {
+          sort: [{ '@timestamp': { order: 'desc' } }],
+          size: 10000
+        };
 
     console.log(`   Fetching events with query:`, JSON.stringify(queryBody, null, 2));
 
-    const allEvents = await esClient.search({
-      index: process.env.ELASTICSEARCH_INDEX || 'cowrie-*',
+    const allEventsResp = await esClient.search({
+      index: process.env.ELASTICSEARCH_INDEX || '.ds-cowrie-*',
       body: queryBody
     });
 
-    console.log(`   ✅ Found ${allEvents.hits.hits.length} events`);
+    const hits = allEventsResp.hits.hits;
+    console.log(`   ✅ Retrieved ${hits.length} events`);
 
-    if (allEvents.hits.hits.length === 0) {
+    if (hits.length === 0) {
       console.log('   ❌ No events found in time range\n');
       return res.json([]);
     }
 
-    // ✅ Group events by session ID manually
+    if (hits.length === 10000) {
+      console.warn('⚠️ /api/sessions/live returned maximum 10k events – results may be truncated');
+    }
+
+    // ✅ Group events by session ID manually (track earliest timestamp, command
+    // count and closed status while iterating instead of building huge arrays)
     const sessionEventsMap = new Map();
-    
-    allEvents.hits.hits.forEach(hit => {
+
+    hits.forEach(hit => {
       const source = hit._source;
       const sessionId = source.session;
-      
       if (!sessionId) return; // Skip events without session ID
-      
-      if (!sessionEventsMap.has(sessionId)) {
-        sessionEventsMap.set(sessionId, []);
+
+      let sess = sessionEventsMap.get(sessionId);
+      const ts = new Date(source['@timestamp']);
+      if (!sess) {
+        sess = {
+          events: [],
+          startTime: ts,
+          lastEventTime: ts,
+          commands: 0,
+          isClosed: false,
+          ip: source.src_ip || source.source_ip || 'unknown'
+        };
+        sessionEventsMap.set(sessionId, sess);
       }
-      
-      sessionEventsMap.get(sessionId).push({
+
+      // update start time if we encounter an older event (necessary because
+      // we are sorted descending)
+      if (ts < sess.startTime) sess.startTime = ts;
+      if (ts > sess.lastEventTime) sess.lastEventTime = ts;
+
+      if (source.eventid === 'cowrie.command.input') sess.commands++;
+      if (source.eventid === 'cowrie.session.closed') sess.isClosed = true;
+
+      // keep raw event in case we need extra info later
+      sess.events.push({
         timestamp: source['@timestamp'],
         eventid: source.eventid,
         src_ip: source.src_ip || source.source_ip,
@@ -402,32 +523,25 @@ app.get('/api/sessions/live', async (req, res) => {
 
     console.log(`   ✅ Found ${sessionEventsMap.size} unique sessions`);
 
-    // ✅ Build session objects
+    // ✅ Build session objects using the accumulated metadata
     const sessionsMap = new Map();
     const now = Date.now();
 
-    for (const [sessionId, events] of sessionEventsMap.entries()) {
-      // Sort events by timestamp
-      events.sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
-      
-      const firstEvent = events[0];
-      const lastEvent = events[events.length - 1];
-      
-      const startTime = new Date(firstEvent.timestamp);
+    for (const [sessionId, sess] of sessionEventsMap.entries()) {
+      const startTime = sess.startTime;
       const startTimeMs = startTime.getTime();
-      
+
       // ✅ Apply client-side time filter based on session START time
       if (jsTimeFilter && startTimeMs < jsTimeFilter) {
         continue; // Skip sessions that started before our time range
       }
-      
-      const ip = firstEvent.src_ip || 'unknown';
+
+      const ip = sess.ip || 'unknown';
       const geoData = getCountryFromIP(ip);
-      
-      // Check if session is closed
-      const isClosed = events.some(e => e.eventid === 'cowrie.session.closed');
-      const lastEventTime = new Date(lastEvent.timestamp);
-      
+
+      const isClosed = sess.isClosed;
+      const lastEventTime = sess.lastEventTime;
+
       // Calculate duration
       let duration;
       if (isClosed) {
@@ -435,35 +549,34 @@ app.get('/api/sessions/live', async (req, res) => {
       } else {
         duration = Math.floor((now - startTimeMs) / 1000);
       }
-      
-      // Count commands
-      const commands = events.filter(e => e.eventid === 'cowrie.command.input').length;
-      
+
+      const commands = sess.commands;
+
       // Calculate risk
       let risk = 3;
       if (commands > 20) risk = 10;
       else if (commands > 10) risk = 9;
       else if (commands > 5) risk = 7;
       else if (commands > 2) risk = 5;
-      
+
       // Calculate time ago
       const timeDiff = now - startTimeMs;
       const minutesAgo = Math.floor(timeDiff / (1000 * 60));
       const hoursAgo = Math.floor(timeDiff / (1000 * 60 * 60));
       const daysAgo = Math.floor(timeDiff / (1000 * 60 * 60 * 24));
-      
+
       let timeAgo;
       if (daysAgo > 0) timeAgo = `${daysAgo}d ago`;
       else if (hoursAgo > 0) timeAgo = `${hoursAgo}h ago`;
       else if (minutesAgo > 0) timeAgo = `${minutesAgo}m ago`;
       else timeAgo = 'just now';
-      
+
       // Determine status
       let status;
-      if (!isClosed && minutesAgo < 5) status = 'active';
-      else if (!isClosed && minutesAgo < 60) status = 'recent';
-      else status = 'closed';
-      
+      if (isClosed) status = 'closed';
+      else if (minutesAgo < 5) status = 'active';
+      else status = 'recent';
+
       sessionsMap.set(sessionId, {
         id: sessionId,
         sessionId: sessionId,
@@ -472,7 +585,7 @@ app.get('/api/sessions/live', async (req, res) => {
         duration: duration,
         commands: commands,
         risk: risk,
-        timestamp: firstEvent.timestamp,
+        timestamp: startTime.toISOString(),
         timeAgo: timeAgo,
         status: status,
         isClosed: isClosed
@@ -509,29 +622,58 @@ app.get('/api/sessions/live', async (req, res) => {
 app.get('/api/sessions/:sessionId/commands', async (req, res) => {
   try {
     const { sessionId } = req.params;
+    if (!isValidSessionId(sessionId)) {
+      return res.status(400).json({ error: 'Invalid session ID' });
+    }
     console.log(`🎬 Fetching commands for session ${sessionId}...`);
 
+    // cap results to avoid huge payloads
     const response = await esClient.search({
-      index: process.env.ELASTICSEARCH_INDEX || 'cowrie-*',
-      size: 10000,
-      body: {
-        query: {
+      index: process.env.ELASTICSEARCH_INDEX || '.ds-cowrie-*',
+      size: 1000,
+     body: {
+  query: {
+    bool: {
+      must: [
+        { term: { 'session': sessionId } },
+        {
           bool: {
-            must: [
-              { term: { 'session.keyword': sessionId } },
-              { term: { 'eventid.keyword': 'cowrie.command.input' } }
-            ]
+            should: [
+              { term: { 'eventid': 'cowrie.command.input' } },
+              { term: { 'eventid': 'cowrie.command.failed' } },
+              { term: { 'eventid': 'cowrie.login.success' } },
+              { term: { 'eventid': 'cowrie.login.failed' } }
+            ],
+            minimum_should_match: 1
           }
-        },
-        sort: [{ '@timestamp': { order: 'asc' } }]
-      }
+        }
+      ]
+    }
+  },
+  sort: [{ '@timestamp': { order: 'asc' } }]
+}
     });
 
-    const commands = response.hits.hits.map(hit => ({
-      input: hit._source.input || hit._source.message || 'unknown command',
-      timestamp: hit._source['@timestamp']
-    }));
+    const commands = response.hits.hits.map(hit => {
+  const s = hit._source;
+  let input = '';
 
+  if (s.eventid === 'cowrie.login.failed') {
+    input = `[LOGIN FAILED] username: ${s.username || '?'}  password: ${s.password || '?'}`;
+  } else if (s.eventid === 'cowrie.login.success') {
+    input = `[LOGIN SUCCESS] username: ${s.username || '?'}  password: ${s.password || '?'}`;
+  } else if (s.eventid === 'cowrie.command.failed') {
+    input = `[CMD NOT FOUND] ${s.input || s.message || '?'}`;
+  } else {
+    input = s.input || s.message || 'unknown';
+  }
+
+  return {
+    input,
+    timestamp: s['@timestamp'],
+    eventid: s.eventid
+  };
+});
     console.log(`✅ Found ${commands.length} commands for session ${sessionId}`);
     
     res.json({
@@ -553,9 +695,12 @@ app.get('/api/sessions/:sessionId/commands', async (req, res) => {
 app.get('/api/sessions/:sessionId/details', async (req, res) => {
   try {
     const { sessionId } = req.params;
+    if (!isValidSessionId(sessionId)) {
+      return res.status(400).json({ error: 'Invalid session ID' });
+    }
 
     const response = await esClient.search({
-      index: process.env.ELASTICSEARCH_INDEX || 'cowrie-*',
+      index: process.env.ELASTICSEARCH_INDEX || '.ds-cowrie-*',
       size: 1000,
       body: {
         query: {
@@ -640,7 +785,7 @@ app.get('/api/system/info', async (req, res) => {
     let esStats = { docs: 0 };
     try {
       const stats = await esClient.indices.stats({
-        index: process.env.ELASTICSEARCH_INDEX || 'cowrie-*'
+        index: process.env.ELASTICSEARCH_INDEX || '.ds-cowrie-*'
       });
       esStats.docs = stats._all?.total?.docs?.count || 0;
     } catch (err) {
@@ -650,7 +795,7 @@ app.get('/api/system/info', async (req, res) => {
     let uniqueIPs = 0;
     try {
       const ipAgg = await esClient.search({
-        index: process.env.ELASTICSEARCH_INDEX || 'cowrie-*',
+        index: process.env.ELASTICSEARCH_INDEX || '.ds-cowrie-*',
         size: 0,
         body: {
           query: {
@@ -661,7 +806,7 @@ app.get('/api/system/info', async (req, res) => {
           aggs: {
             unique_ips: {
               cardinality: {
-                field: 'src_ip.keyword'
+                field: 'src_ip'
               }
             }
           }
@@ -732,23 +877,14 @@ function formatUptime(seconds) {
 // Restart Services
 app.post('/api/services/restart', async (req, res) => {
   try {
-    console.log('🔄 Service restart requested...');
-    
-    const services = ['cowrie', 'elasticsearch', 'logstash', 'kibana'];
-    const restartResults = {};
-    
-    for (const service of services) {
-      restartResults[service] = 'restarted';
-      console.log(`✅ ${service} restart initiated`);
-    }
-    
+    console.log('🔄 Service restart requested (placeholder)');
+    // real restart logic depends on your environment (systemd, docker, pm2, etc.)
+    // for now we just acknowledge the request and log it.
     res.json({
       success: true,
-      message: 'All services restart initiated',
-      services: restartResults,
+      message: 'Service restart simulated (not actually implemented)',
       timestamp: new Date().toISOString()
     });
-    
   } catch (error) {
     console.error('Error restarting services:', error);
     res.status(500).json({
@@ -763,7 +899,9 @@ app.post('/api/services/restart', async (req, res) => {
 app.get('/api/analytics/timeline', async (req, res) => {
   try {
     const range = req.query.range || 'now-24h';
-    
+    if (range && !isValidRange(range)) {
+      return res.status(400).json({ error: 'Invalid range parameter' });
+    }
     let interval = '1h';
     if (range === 'now-7d') {
       interval = '6h';
@@ -774,7 +912,7 @@ app.get('/api/analytics/timeline', async (req, res) => {
     console.log(`\n📊 [TIMELINE] Fetching range: ${range}, interval: ${interval}`);
     
     const response = await esClient.search({
-      index: process.env.ELASTICSEARCH_INDEX || 'cowrie-*',
+      index: process.env.ELASTICSEARCH_INDEX || '.ds-cowrie-*',
       size: 0,
       body: {
         query: {
@@ -800,7 +938,8 @@ app.get('/api/analytics/timeline', async (req, res) => {
       }
     });
 
-    const buckets = response.aggregations?.attacks_over_time?.buckets || [];
+    const aggs = extractAggs(response);
+    const buckets = aggs.attacks_over_time?.buckets || [];
     
     const timeline = buckets.map(bucket => {
       const date = new Date(bucket.key);
@@ -862,7 +1001,7 @@ app.get('/api/analytics/countries', async (req, res) => {
         aggs: {
           unique_ips: {
             terms: {
-              field: 'src_ip.keyword',  // ✅ This field EXISTS
+              field: 'src_ip',  // ✅ This field EXISTS
               size: 1000
             }
           }
@@ -882,10 +1021,13 @@ app.get('/api/analytics/countries', async (req, res) => {
     }
     
     const response = await esClient.search({
-      index: process.env.ELASTICSEARCH_INDEX || 'cowrie-*',
+      index: process.env.ELASTICSEARCH_INDEX || '.ds-cowrie-*',
       size: 0,
       body: queryBody
     });
+    console.log('🔍 [DEBUG] Full response:', JSON.stringify(response, null, 2));
+    console.log('🔍 [DEBUG] Aggregations:', JSON.stringify(response.aggregations, null, 2));
+    console.log('🔍 [DEBUG] Body aggregations:', JSON.stringify(response.body?.aggregations, null, 2));
     
     const total = response.aggregations?.unique_ips?.buckets.reduce((sum, b) => sum + b.doc_count, 0) || 0;
     const ipBuckets = response.aggregations?.unique_ips?.buckets || [];
@@ -943,7 +1085,9 @@ function getCountryFlag(countryCode) {
 app.get('/api/credentials/table', async (req, res) => {
   try {
     const { range } = req.query;
-    
+    if (range && !isValidRange(range)) {
+      return res.status(400).json({ error: 'Invalid range parameter' });
+    }
     if (range) {
       console.log(`🔑 [CREDENTIALS] Fetching with time range: ${range}`);
     }
@@ -975,7 +1119,7 @@ app.get('/api/credentials/table', async (req, res) => {
     }
     
     const response = await esClient.search({
-      index: process.env.ELASTICSEARCH_INDEX || 'cowrie-*',
+      index: process.env.ELASTICSEARCH_INDEX || '.ds-cowrie-*',
       size: 0,
       body: {
         query: {
@@ -995,13 +1139,13 @@ app.get('/api/credentials/table', async (req, res) => {
             aggs: {
               attempts: { value_count: { field: 'username.keyword' } },
               success: {
-                filter: { term: { 'eventid.keyword': 'cowrie.login.success' } }
+                filter: { term: { 'eventid': 'cowrie.login.success' } }
               },
               failed: {
-                filter: { term: { 'eventid.keyword': 'cowrie.login.failed' } }
+                filter: { term: { 'eventid': 'cowrie.login.failed' } }
               },
               countries: {
-                terms: { field: 'src_ip.keyword', size: 10 }
+                terms: { field: 'src_ip', size: 10 }
               },
               first_seen: { min: { field: '@timestamp' } },
               last_seen: { max: { field: '@timestamp' } }
@@ -1047,7 +1191,7 @@ app.get('/api/credentials/table', async (req, res) => {
 app.get('/api/analytics/behavioral', async (req, res) => {
   try {
     const response = await esClient.search({
-      index: process.env.ELASTICSEARCH_INDEX || 'cowrie-*',
+      index: process.env.ELASTICSEARCH_INDEX || '.ds-cowrie-*',
       size: 1000,
       body: {
         query: { match_all: {} }
@@ -1057,6 +1201,7 @@ app.get('/api/analytics/behavioral', async (req, res) => {
     const attacks = response.hits.hits.map(hit => hit._source);
     const totalAttacks = attacks.length;
     
+    // Patterns remain mostly static for now; could be derived from event types later
     const patterns = [
       {
         id: 1,
@@ -1084,82 +1229,127 @@ app.get('/api/analytics/behavioral', async (req, res) => {
       }
     ];
 
+    // build a map of events by source IP so we can compute real profile stats
     const ipMap = new Map();
     attacks.forEach(attack => {
       const ip = attack.src_ip || attack.source_ip || 'unknown';
       if (!ipMap.has(ip)) {
-        ipMap.set(ip, { ip, count: 0 });
+        ipMap.set(ip, []);
       }
-      ipMap.get(ip).count++;
+      ipMap.get(ip).push(attack);
     });
 
-    const topIPs = Array.from(ipMap.values())
-      .sort((a, b) => b.count - a.count)
-      .slice(0, 5);
+    // helper to derive tactics from event list (same logic used on frontend)
+    const determineTacticsLocal = (events) => {
+      const tactics = [];
+      const totalCommands = events.filter(e => e.eventid === 'cowrie.command.input').length;
+      const highRisk = events.some(e => e.risk >= 7);
+      tactics.push('Initial Access (T1078)');
+      if (totalCommands > 0) tactics.push('Execution (T1059)');
+      if (highRisk || totalCommands > 10) tactics.push('Persistence (T1136)');
+      if (totalCommands > 5) tactics.push('Discovery (T1082)');
+      const longSession = events.some(e => {
+        const start = new Date(events[0]['@timestamp']);
+        const last = new Date(events[events.length - 1]['@timestamp']);
+        return (last - start) / 1000 > 300;
+      });
+      if (longSession) tactics.push('Command & Control (T1071)');
+      return tactics;
+    };
 
-    const profiles = topIPs.map((ipData, i) => {
-      const geoData = getCountryFromIP(ipData.ip);
+    const profiles = Array.from(ipMap.entries()).map(([ip, events], idx) => {
+      const geoData = getCountryFromIP(ip);
+
+      // group by session for duration/commands/services
+      const sessionMap = new Map();
+      events.forEach(e => {
+        const sid = e.session || 'no-session';
+        if (!sessionMap.has(sid)) sessionMap.set(sid, []);
+        sessionMap.get(sid).push(e);
+      });
+
+      let totalDuration = 0;
+      let totalCommands = 0;
+      const serviceSet = new Set();
+
+      sessionMap.forEach(evts => {
+        evts.sort((a, b) => new Date(a['@timestamp']) - new Date(b['@timestamp']));
+        const start = new Date(evts[0]['@timestamp']);
+        const end = new Date(evts[evts.length - 1]['@timestamp']);
+        totalDuration += (end - start) / 1000;
+        evts.forEach(evt => {
+          if (evt.eventid === 'cowrie.command.input') totalCommands++;
+          if (evt.service) serviceSet.add(evt.service);
+        });
+      });
+
+      const avgSessionDuration = sessionMap.size > 0 ? Math.floor(totalDuration / sessionMap.size) : 0;
+      const uniqueCommands = totalCommands;
+      const targetedServices = serviceSet.size > 0 ? Array.from(serviceSet) : ['SSH'];
+      const tactics = determineTacticsLocal(events);
+
       return {
-        id: `ATK-${String(i + 1).padStart(3, '0')}`,
-        skillLevel: i === 0 ? 'advanced' : i === 1 ? 'intermediate' : 'script_kiddie',
-        threatScore: (9 - i * 1.5).toFixed(1),
-        totalAttacks: ipData.count,
-        successRate: Math.floor(Math.random() * 30),
-        tools: i === 0 ? ['Hydra', 'Nmap', 'Custom Scripts'] : i === 1 ? ['Hydra', 'Medusa'] : ['Public Exploits'],
-        countries: [geoData.flag + ' ' + geoData.country]
+        id: ip,
+        skillLevel: 'unknown',
+        threatScore: Math.min(10, totalCommands),
+        totalAttacks: events.length,
+        successRate: 0,
+        tools: [],
+        countries: [geoData.flag + ' ' + geoData.country],
+        tactics,
+        targetedServices,
+        avgSessionDuration,
+        uniqueCommands
       };
     });
 
-    const vulnerabilities = [
-      {
-        cve: 'CVE-2026-1234',
-        name: 'SSH Authentication Bypass',
-        severity: 9.8,
-        targetFrequency: totalAttacks,
-        successRate: 12
-      },
-      {
-        cve: 'CVE-2026-5678',
-        name: 'Remote Code Execution',
-        severity: 8.9,
-        targetFrequency: Math.floor(totalAttacks * 0.6),
-        successRate: 8
-      },
-      {
-        cve: 'CVE-2026-9012',
-        name: 'Privilege Escalation',
-        severity: 7.5,
-        targetFrequency: Math.floor(totalAttacks * 0.4),
-        successRate: 5
-      }
-    ];
+    // sort & keep top 5 profiles by volume
+    profiles.sort((a, b) => b.totalAttacks - a.totalAttacks);
+    const topProfiles = profiles.slice(0, 5);
 
-    const mitreTactics = [
-      {
-        tactic: 'Initial Access',
-        techniques: ['T1078: Valid Accounts', 'T1190: Exploit Public-Facing Application'],
-        count: totalAttacks
-      },
-      {
-        tactic: 'Execution',
-        techniques: ['T1059: Command and Scripting Interpreter', 'T1203: Exploitation for Client Execution'],
-        count: Math.floor(totalAttacks * 0.7)
-      },
-      {
-        tactic: 'Persistence',
-        techniques: ['T1136: Create Account', 'T1053: Scheduled Task/Job'],
-        count: Math.floor(totalAttacks * 0.4)
-      },
-      {
-        tactic: 'Privilege Escalation',
-        techniques: ['T1068: Exploitation for Privilege Escalation'],
-        count: Math.floor(totalAttacks * 0.2)
-      }
-    ];
+    // extract vulnerabilities by scanning messages for CVEs
+    const vulnMap = new Map();
+     attacks.forEach(a => {
+  try {
+    const msg = a.message || a.details || a.input || '';
+    
+    // ✅ Convert to string if it's an object
+    const messageStr = typeof msg === 'string' ? msg : 
+                      typeof msg === 'object' ? JSON.stringify(msg) : 
+                      String(msg);
+    
+    const matches = messageStr.match(/CVE-\d{4}-\d+/g);
+    if (matches) {
+      matches.forEach(cve => {
+        vulnMap.set(cve, (vulnMap.get(cve) || 0) + 1);
+      });
+    }
+  } catch (err) {
+    console.error('Error parsing message for CVE:', err);
+  }
+});
+    const vulnerabilities = Array.from(vulnMap.entries())
+      .sort(([,a],[,b]) => b - a)
+      .slice(0, 3)
+      .map(([cve,count]) => ({ cve, name: cve, severity: 0, targetFrequency: count, successRate: 0 }));
+
+
+    // build MITRE counts from the tactics arrays in our top profiles
+    const tacticCounts = {};
+    topProfiles.forEach(p => {
+      p.tactics?.forEach(t => {
+        tacticCounts[t] = (tacticCounts[t] || 0) + 1;
+      });
+    });
+    const mitreTactics = Object.entries(tacticCounts).map(([tactic, count]) => ({
+      tactic,
+      techniques: [], // frontend can fill in if desired
+      count
+    }));
 
     res.json({
       patterns,
-      profiles,
+      profiles: topProfiles,
       vulnerabilities,
       mitre: mitreTactics
     });
@@ -1173,11 +1363,13 @@ app.get('/api/analytics/behavioral', async (req, res) => {
 app.get('/api/analytics/stats', async (req, res) => {
   try {
     const range = req.query.range || 'now-24h';
-    
+    if (range && !isValidRange(range)) {
+      return res.status(400).json({ error: 'Invalid range parameter' });
+    }
     console.log(`📊 [ANALYTICS STATS] Fetching for range: ${range}`);
     
     const totalResponse = await esClient.count({
-      index: process.env.ELASTICSEARCH_INDEX || 'cowrie-*',
+      index: process.env.ELASTICSEARCH_INDEX || '.ds-cowrie-*',
       body: {
         query: {
           range: {
@@ -1190,7 +1382,7 @@ app.get('/api/analytics/stats', async (req, res) => {
     });
 
     const countriesResponse = await esClient.search({
-      index: process.env.ELASTICSEARCH_INDEX || 'cowrie-*',
+      index: process.env.ELASTICSEARCH_INDEX || '.ds-cowrie-*',
       size: 0,
       body: {
         query: {
@@ -1210,7 +1402,7 @@ app.get('/api/analytics/stats', async (req, res) => {
       }
     });
 
-    const uniqueIPs = countriesResponse.aggregations?.unique_ips?.value || 0;
+    const uniqueIPs = extractAggs(countriesResponse).unique_ips?.value || 0;
     const totalAttacks = totalResponse.count;
 
     console.log(`✅ [ANALYTICS STATS] ${totalAttacks} attacks from ${uniqueIPs} unique IPs`);
@@ -1230,11 +1422,28 @@ app.get('/api/analytics/stats', async (req, res) => {
 app.get('/api/analytics/distribution', async (req, res) => {
   try {
     const range = req.query.range || 'now-7d';
-    
-    console.log(`📊 [DISTRIBUTION] Fetching for range: ${range}`);
-    
+    const groupBy = req.query.groupBy || 'eventid'; // 'eventid' (attack type) or 'src_country'
+
+    if (range && !isValidRange(range)) {
+      return res.status(400).json({ error: 'Invalid range parameter' });
+    }
+
+    console.log(`📊 [DISTRIBUTION] Fetching for range: ${range}, groupBy: ${groupBy}`);
+
+    // determine field for aggregation
+    let aggField = 'eventid';
+    switch (groupBy) {
+      case 'country':
+      case 'src_country':
+        aggField = 'src_country';
+        break;
+      case 'eventid':
+      default:
+        aggField = 'eventid';
+    }
+
     const response = await esClient.search({
-      index: process.env.ELASTICSEARCH_INDEX || 'cowrie-*',
+      index: process.env.ELASTICSEARCH_INDEX || '.ds-cowrie-*',
       size: 0,
       body: {
         query: {
@@ -1245,9 +1454,9 @@ app.get('/api/analytics/distribution', async (req, res) => {
           }
         },
         aggs: {
-          attack_types: {
+          distribution: {
             terms: {
-              field: 'eventid',
+              field: aggField,
               size: 20
             }
           }
@@ -1255,8 +1464,20 @@ app.get('/api/analytics/distribution', async (req, res) => {
       }
     });
 
-    const buckets = response.aggregations?.attack_types?.buckets || [];
-    
+    const buckets = extractAggs(response).distribution?.buckets || [];
+
+    if (aggField === 'src_country') {
+      // return country-flag style results
+      const distribution = buckets.map(bucket => ({
+        name: bucket.key,
+        value: bucket.doc_count,
+        color: '#4ADE80' // greenish default
+      }));
+      const top = distribution.sort((a, b) => b.value - a.value).slice(0, 10);
+      return res.json(top);
+    }
+
+    // otherwise map eventid -> human names as before
     const eventMapping = {
       'cowrie.login.failed': { name: 'Failed Login Attempts', color: '#FF6B35' },
       'cowrie.login.success': { name: 'Successful Logins', color: '#DC2626' },
@@ -1291,7 +1512,7 @@ app.get('/api/analytics/distribution', async (req, res) => {
       .sort((a, b) => b.value - a.value)
       .slice(0, 5);
 
-    console.log(`✅ [DISTRIBUTION] Returning ${topDistribution.length} attack types`);
+    console.log(`✅ [DISTRIBUTION] Returning ${topDistribution.length} items`);
     
     res.json(topDistribution);
   } catch (error) {
@@ -1339,10 +1560,12 @@ app.post('/api/settings', async (req, res) => {
 app.delete('/api/data/clear', async (req, res) => {
   try {
     console.log('⚠️  CLEAR ALL DATA requested...');
-    
+    const indexPattern = process.env.ELASTICSEARCH_INDEX || '.ds-cowrie-*';
+    await esClient.indices.delete({ index: indexPattern, ignore_unavailable: true });
+    console.log(`🗑️  Deleted indices matching ${indexPattern}`);
     res.json({
       success: true,
-      message: 'All data cleared successfully',
+      message: `All data cleared (indices ${indexPattern} removed)`,
       timestamp: new Date().toISOString()
     });
   } catch (error) {
@@ -1361,13 +1584,13 @@ app.get('/api/debug/events', async (req, res) => {
     console.log('🔍 Checking what events exist in Elasticsearch...');
     
     const eventsResponse = await esClient.search({
-      index: process.env.ELASTICSEARCH_INDEX || 'cowrie-*',
+      index: process.env.ELASTICSEARCH_INDEX || '.ds-cowrie-*',
       size: 0,
       body: {
         aggs: {
           event_types: {
             terms: {
-              field: 'eventid.keyword',
+              field: 'eventid',
               size: 50
             }
           }
@@ -1375,7 +1598,7 @@ app.get('/api/debug/events', async (req, res) => {
       }
     });
 
-    const eventTypes = eventsResponse.aggregations?.event_types?.buckets.map(b => ({
+    const eventTypes = extractAggs(eventsResponse).event_types?.buckets.map(b => ({
       eventType: b.key,
       count: b.doc_count
     })) || [];
@@ -1383,7 +1606,7 @@ app.get('/api/debug/events', async (req, res) => {
     console.log('📊 Event types found:', eventTypes);
 
     const sampleResponse = await esClient.search({
-      index: process.env.ELASTICSEARCH_INDEX || 'cowrie-*',
+      index: process.env.ELASTICSEARCH_INDEX || '.ds-cowrie-*',
       size: 5,
       sort: [{ '@timestamp': { order: 'desc' } }]
     });
@@ -1399,7 +1622,7 @@ app.get('/api/debug/events', async (req, res) => {
     console.log('📄 Sample documents:', samples.length);
 
     const sessionFieldsResponse = await esClient.search({
-      index: process.env.ELASTICSEARCH_INDEX || 'cowrie-*',
+      index: process.env.ELASTICSEARCH_INDEX || '.ds-cowrie-*',
       size: 1,
       body: {
         query: {
@@ -1414,7 +1637,7 @@ app.get('/api/debug/events', async (req, res) => {
     console.log('✅ Has session field:', hasSessionField);
 
     const totalResponse = await esClient.count({
-      index: process.env.ELASTICSEARCH_INDEX || 'cowrie-*'
+      index: process.env.ELASTICSEARCH_INDEX || '.ds-cowrie-*'
     });
 
     const response = {
@@ -1422,7 +1645,7 @@ app.get('/api/debug/events', async (req, res) => {
       eventTypes: eventTypes,
       hasSessionField: hasSessionField,
       sampleDocuments: samples,
-      indexPattern: process.env.ELASTICSEARCH_INDEX || 'cowrie-*',
+      indexPattern: process.env.ELASTICSEARCH_INDEX || '.ds-cowrie-*',
       timestamp: new Date().toISOString()
     };
 
@@ -1443,11 +1666,11 @@ app.get('/api/debug/data', async (req, res) => {
     console.log('\n🔍 CHECKING ELASTICSEARCH DATA...\n');
     
     const total = await esClient.count({
-      index: process.env.ELASTICSEARCH_INDEX || 'cowrie-*'
+      index: process.env.ELASTICSEARCH_INDEX || '.ds-cowrie-*'
     });
     
     const last7d = await esClient.count({
-      index: process.env.ELASTICSEARCH_INDEX || 'cowrie-*',
+      index: process.env.ELASTICSEARCH_INDEX || '.ds-cowrie-*',
       body: {
         query: {
           range: {
@@ -1458,7 +1681,7 @@ app.get('/api/debug/data', async (req, res) => {
     });
     
     const last30d = await esClient.count({
-      index: process.env.ELASTICSEARCH_INDEX || 'cowrie-*',
+      index: process.env.ELASTICSEARCH_INDEX || '.ds-cowrie-*',
       body: {
         query: {
           range: {
@@ -1469,7 +1692,7 @@ app.get('/api/debug/data', async (req, res) => {
     });
     
     const dateRange = await esClient.search({
-      index: process.env.ELASTICSEARCH_INDEX || 'cowrie-*',
+      index: process.env.ELASTICSEARCH_INDEX || '.ds-cowrie-*',
       size: 0,
       body: {
         aggs: {
@@ -1499,7 +1722,7 @@ app.get('/api/debug/data', async (req, res) => {
 app.get('/api/debug/sample', async (req, res) => {
   try {
     const sample = await esClient.search({
-      index: process.env.ELASTICSEARCH_INDEX || 'cowrie-*',
+      index: process.env.ELASTICSEARCH_INDEX || '.ds-cowrie-*',
       size: 1,
       sort: [{ '@timestamp': { order: 'desc' } }]
     });
@@ -1521,7 +1744,7 @@ app.get('/api/debug/sample', async (req, res) => {
 app.get('/api/debug/eventids', async (req, res) => {
   try {
     const sample = await esClient.search({
-      index: process.env.ELASTICSEARCH_INDEX || 'cowrie-*',
+      index: process.env.ELASTICSEARCH_INDEX || '.ds-cowrie-*',
       size: 5,
       sort: [{ '@timestamp': { order: 'desc' } }]
     });
@@ -1538,6 +1761,33 @@ app.get('/api/debug/eventids', async (req, res) => {
   }
 });
 
+app.get('/api/debug/session-fields', async (req, res) => {
+  try {
+    const sample = await esClient.search({
+      index: process.env.ELASTICSEARCH_INDEX || '.ds-cowrie-*',
+      size: 1,
+      body: {
+        query: {
+          term: { 'eventid': 'cowrie.session.connect' }
+        },
+        sort: [{ '@timestamp': { order: 'desc' } }]
+      }
+    });
+
+    if (sample.hits.hits.length === 0) {
+      return res.json({ error: 'No cowrie.session.connect events found at all' });
+    }
+
+    const doc = sample.hits.hits[0]._source;
+    res.json({
+      allFields: Object.keys(doc),
+      fullDocument: doc
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // WebSocket connection handling
 io.on('connection', (socket) => {
   console.log('🔌 Client connected:', socket.id);
@@ -1545,7 +1795,7 @@ io.on('connection', (socket) => {
   const sendUpdates = async () => {
     try {
       const response = await esClient.search({
-        index: process.env.ELASTICSEARCH_INDEX || 'cowrie-*',
+        index: process.env.ELASTICSEARCH_INDEX || '.ds-cowrie-*',
         size: 1,
         sort: [{ '@timestamp': { order: 'desc' } }]
       });
@@ -1579,17 +1829,23 @@ io.on('connection', (socket) => {
 // REAL-TIME SESSION MONITORING
 // ============================================
 
-let lastCheckedTimestamp = new Date();
+let lastCheckedTimestamp = new Date(Date.now() - 24 * 60 * 60 * 1000);
 const knownSessions = new Map();
 
 const requestCounts = new Map(); // Track requests per IP
 
-// Monitor for DDoS every 60 seconds
+// Monitor for DDoS every 60 seconds, evict stale entries
 setInterval(() => {
   const suspicious = [];
   const now = Date.now();
   
   for (const [ip, data] of requestCounts.entries()) {
+    // remove ips last seen more than a minute ago
+    if (now - data.lastSeen > 60000) {
+      requestCounts.delete(ip);
+      continue;
+    }
+
     if (data.count > 100) { // 100+ requests per minute = suspicious
       suspicious.push({ 
         ip, 
@@ -1612,8 +1868,10 @@ setInterval(() => {
     });
   }
   
-  // Clear counts every minute
-  requestCounts.clear();
+  // reset counts that remain
+  for (const data of requestCounts.values()) {
+    data.count = 0;
+  }
 }, 60000);
 
 
@@ -1622,9 +1880,10 @@ async function broadcastNewSessions() {
   try {
     const now = new Date();
     
+    const batchSize = 1000;
     const newEvents = await esClient.search({
-      index: process.env.ELASTICSEARCH_INDEX || 'cowrie-*',
-      size: 100,
+      index: process.env.ELASTICSEARCH_INDEX || '.ds-cowrie-*',
+      size: batchSize,
       body: {
         query: {
           range: {
@@ -1640,6 +1899,9 @@ async function broadcastNewSessions() {
 
     if (newEvents.hits.hits.length > 0) {
       console.log(`🔴 [LIVE] Found ${newEvents.hits.hits.length} new events`);
+      if (newEvents.hits.hits.length === batchSize) {
+        console.warn('⚠️ broadcastNewSessions result capped at', batchSize);
+      }
       
       const sessionEventsMap = new Map();
       
@@ -1688,7 +1950,7 @@ async function broadcastNewSessions() {
           duration: 0,
           commands: Math.max(0, Math.min(10000, commands)),
           risk: Math.max(0, Math.min(10, risk)),
-          timestamp: firstEvent.timestamp,
+          timestamp: firstEvent['@timestamp'],
           timeAgo: 'just now',
           status: isClosed ? 'closed' : 'active',
           isClosed: !!isClosed,
@@ -1710,17 +1972,38 @@ async function broadcastNewSessions() {
             isClosed: isClosed
           });
 
-          // Send notification
-          if (risk >= 7 && notificationService) {
-            const alert = {
-              type: 'session',
+          // Send to alert rules engine
+          if (risk >= 7 && alertRulesEngine) {
+            const incomingAlert = {
+              type: 'brute_force',
               severity: risk >= 9 ? 'critical' : 'high',
               title: `🚨 ${risk >= 9 ? 'CRITICAL' : 'HIGH RISK'} Attack Detected!`,
-              message: `New SSH attack from ${ip} (${geoData.country}) - Risk: ${risk}/10`,
-              session: sessionData,
-              timestamp: new Date().toISOString()
+              description: `New SSH attack from ${ip} (${geoData.country}) - Risk: ${risk}/10`,
+              sourceIp: ip,
+              country: geoData.country,
+              sessionId: sessionId,
+              timestamp: firstEvent['@timestamp'],
+              failedAttempts: commands, // Simplified
+              commandCount: commands
             };
-            await notificationService.sendNotification(alert);
+
+            // Process through alert rules engine
+            const ruleResults = await alertRulesEngine.processAlert(incomingAlert);
+            
+            // Send immediate alerts through notification service
+            for (const triggered of ruleResults.triggered) {
+              if (notificationService) {
+                await notificationService.sendAlert({
+                  severity: triggered.alert.severity,
+                  title: triggered.alert.title,
+                  description: triggered.alert.description,
+                  sourceIp: triggered.alert.sourceIp,
+                  country: triggered.alert.country,
+                  timestamp: triggered.alert.timestamp,
+                  type: triggered.alert.type
+                });
+              }
+            }
           }
         } else {
           // ✅ SESSION UPDATE
@@ -1744,7 +2027,15 @@ async function broadcastNewSessions() {
       }
     }
 
-    lastCheckedTimestamp = now;
+    // advance pointer intelligently – if we hit the batch cap move to the
+    // timestamp of the last event we actually processed rather than jumping
+    // all the way to now, otherwise we could skip unreturned events.
+    if (newEvents && newEvents.hits && newEvents.hits.hits.length === batchSize) {
+      const lastTsStr = newEvents.hits.hits[newEvents.hits.hits.length - 1]._source['@timestamp'];
+      lastCheckedTimestamp = new Date(lastTsStr);
+    } else {
+      lastCheckedTimestamp = now;
+    }
 
   } catch (error) {
     console.error('❌ [LIVE] Error broadcasting sessions:', error.message);
@@ -1756,7 +2047,7 @@ async function broadcastThreatIntel() {
   try {
     // Top attackers
     const topAttackersRes = await esClient.search({
-      index: process.env.ELASTICSEARCH_INDEX || 'cowrie-*',
+      index: process.env.ELASTICSEARCH_INDEX || '.ds-cowrie-*',
       size: 0,
       body: {
         query: { range: { '@timestamp': { gte: 'now-24h' } } },
@@ -1780,13 +2071,13 @@ async function broadcastThreatIntel() {
 
     // Common commands
     const commandsRes = await esClient.search({
-      index: process.env.ELASTICSEARCH_INDEX || 'cowrie-*',
+      index: process.env.ELASTICSEARCH_INDEX || '.ds-cowrie-*',
       size: 0,
       body: {
         query: {
           bool: {
             must: [
-              { term: { 'eventid.keyword': 'cowrie.command.input' } },
+              { term: { 'eventid': 'cowrie.command.input' } },
               { range: { '@timestamp': { gte: 'now-24h' } } }
             ]
           }
@@ -1816,9 +2107,7 @@ async function broadcastThreatIntel() {
   }
 }
 
-// Start real-time monitoring
-setInterval(broadcastNewSessions, 2000); // Check every 2 seconds
-console.log('🔴 Real-time session monitoring started (2s interval)');
+
 
 // Start server
 const PORT = process.env.PORT || 5001;
@@ -1831,7 +2120,9 @@ const startServer = async () => {
     const health = await esClient.cluster.health();
     console.log(`✅ Elasticsearch connected: ${health.cluster_name}`);
     console.log('🔄 Starting session monitor...');
-    monitorSessions();
+    // run monitor once at startup and then schedule it to run every minute
+    await monitorSessions();
+    setInterval(monitorSessions, 60000);
     console.log('🔴 Starting real-time attack monitoring...');
     setInterval(broadcastNewSessions, 2000);
    setInterval(broadcastThreatIntel, 30000); // Every 30 seconds

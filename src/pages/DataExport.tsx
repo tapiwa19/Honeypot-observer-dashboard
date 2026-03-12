@@ -19,8 +19,10 @@ import {
 import axios from 'axios';
 import { io, Socket } from 'socket.io-client';
 
-const API_BASE = 'http://localhost:5001/api';
-const WS_URL = 'http://localhost:5001';
+import { SOCKET_URL } from '../utils/constants';
+
+const WS_URL = SOCKET_URL;
+
 
 interface ExportHistoryItem {
   id: string;
@@ -92,12 +94,12 @@ export default function DataExport() {
         sessionsData,
         countriesData
       ] = await Promise.all([
-        axios.get(`${API_BASE}/dashboard/stats`),
-        axios.get(`${API_BASE}/analytics/timeline?range=now-24h`),
-        axios.get(`${API_BASE}/dashboard/attacks`, { params: { range, limit: 10000 } }),
-        axios.get(`${API_BASE}/credentials/table`, { params: { range } }),
-        axios.get(`${API_BASE}/sessions/live`, { params: { range } }),
-        axios.get(`${API_BASE}/analytics/countries`, { params: { range } })
+        axios.get(`/dashboard/stats`),
+        axios.get(`/analytics/timeline?range=now-24h`),
+        axios.get(`/dashboard/attacks`, { params: { range, limit: 10000 } }),
+        axios.get(`/credentials/table`, { params: { range } }),
+        axios.get(`/sessions/live`, { params: { range } }),
+        axios.get(`/analytics/countries`, { params: { range } })
       ]);
       
       const totalAttacks = allAttacksData.data?.length || 0;
@@ -267,19 +269,19 @@ export default function DataExport() {
       
       switch (dataType) {
         case 'attacks':
-          endpoint = `${API_BASE}/dashboard/attacks`;
+          endpoint = `/dashboard/attacks`;
           params = { range, limit: 10000 };
           break;
         case 'credentials':
-          endpoint = `${API_BASE}/credentials/table`;
+          endpoint = `/credentials/table`;
           params = { range };
           break;
         case 'sessions':
-          endpoint = `${API_BASE}/sessions/live`;
+          endpoint = `/sessions/live`;
           params = { range };
           break;
         case 'geographic':
-          endpoint = `${API_BASE}/analytics/countries`;
+          endpoint = `/analytics/countries`;
           params = { range };
           break;
         default:

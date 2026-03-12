@@ -4,8 +4,10 @@ import axios from 'axios';
 import { motion, AnimatePresence } from 'framer-motion';
 import { io, Socket } from 'socket.io-client';
 
-const API_BASE = 'http://localhost:5001/api';
-const WS_URL = 'http://localhost:5001';
+import { SOCKET_URL } from '../utils/constants';
+
+const WS_URL = SOCKET_URL;
+
 
 // ============================================
 // TYPESCRIPT INTERFACES
@@ -320,9 +322,11 @@ export default function Alerts() {
   const [stats, setStats] = useState({
     active: 0,
     resolved: 0,
-    avgResponseTime: '0m',
+    avgResponseTime: '0s', // now measured in seconds/minutes/hours
     critical: 0
   });
+  // timestamp (ms) after which alerts are included in average; null means include all
+  const [statsResetAt, setStatsResetAt] = useState<number | null>(null);
   
   const [alertRules, setAlertRules] = useState<AlertRule[]>([
     {
@@ -522,7 +526,7 @@ export default function Alerts() {
     try {
       setError(null);
       
-      const response = await axios.get(`${API_BASE}/dashboard/attacks`);
+      const response = await axios.get(`/dashboard/attacks`);
       
       const convertedAlerts: Alert[] = response.data.map((attack: any, index: number) => {
         const severity = calculateSeverity(attack);
@@ -571,24 +575,37 @@ export default function Alerts() {
       });
       const criticalAlerts = convertedAlerts.filter(a => a.severity === 'critical');
       
+      // compute average only for alerts after the reset timestamp (if set)
       let totalResponseSeconds = 0;
       let resolvedCount = 0;
-      
+
       convertedAlerts.forEach(alert => {
         if (alert.status === 'resolved' && alert.attackTime) {
-          const responseTime = (now - alert.attackTime.getTime()) / 1000;
-          totalResponseSeconds += responseTime;
-          resolvedCount++;
+          if (!statsResetAt || alert.attackTime.getTime() >= statsResetAt) {
+            const responseTime = (now - alert.attackTime.getTime()) / 1000;
+            totalResponseSeconds += responseTime;
+            resolvedCount++;
+          }
         }
       });
-      
+
       const avgResponseSeconds = resolvedCount > 0 ? totalResponseSeconds / resolvedCount : 0;
-      const avgResponseMinutes = Math.floor(avgResponseSeconds / 60);
+      const roundedSeconds = Math.round(avgResponseSeconds);
+      
+      // pick a human‑readable unit without making the UI more complex
+      let display: string;
+      if (roundedSeconds < 60) {
+        display = `${roundedSeconds}s`;
+      } else if (roundedSeconds < 3600) {
+        display = `${Math.round(roundedSeconds / 60)}m`;
+      } else {
+        display = `${Math.round(roundedSeconds / 3600)}h`;
+      }
       
       setStats({
         active: activeAlerts.length,
         resolved: resolvedToday.length,
-        avgResponseTime: `${avgResponseMinutes}m`,
+        avgResponseTime: display,
         critical: criticalAlerts.length
       });
       
@@ -600,7 +617,7 @@ export default function Alerts() {
 
   const fetchSessionCommands = async (sessionId: string) => {
     try {
-      const response = await axios.get(`${API_BASE}/sessions/${sessionId}/commands`);
+      const response = await axios.get(`/sessions/${sessionId}/commands`);
       return response.data.commands || [];
     } catch (error) {
       console.error('Error fetching commands:', error);
@@ -643,6 +660,9 @@ export default function Alerts() {
     };
     
     setAlerts(alerts.map(a => a.id === alertId ? updatedAlert : a));
+    // when user archives an alert, automatically show the archive tab so it disappears from
+    // the current list (even if "all" was selected) and they can review the archived items.
+    setActiveFilter('archived');
   };
 
   const handleViewSolution = (alert: Alert) => {
@@ -729,11 +749,16 @@ export default function Alerts() {
   useEffect(() => {
     fetchAlerts();
     // ✅ REMOVED polling - WebSocket handles real-time updates now!
-  }, []);
+  }, [statsResetAt]);
+
+  const resetStats = () => {
+    setStatsResetAt(Date.now());
+  };
 
   // Computed Values
   const filteredAlerts = (() => {
-    if (activeFilter === 'all') return alerts;
+    // "All" means every *un‑archived* alert – archived alerts live in their own bucket
+    if (activeFilter === 'all') return alerts.filter(a => a.status !== 'archived');
     if (activeFilter === 'critical') return alerts.filter(a => a.severity === 'critical');
     return alerts.filter(a => a.status === activeFilter);
   })();
@@ -831,6 +856,14 @@ export default function Alerts() {
         )}
 
         {/* Alert Statistics Cards - CLICKABLE */}
+        <div className="flex justify-end mb-2">
+          <button
+            onClick={resetStats}
+            className="px-3 py-1 text-xs bg-yellow-600 text-white rounded hover:bg-yellow-500 transition"
+          >
+            Reset Avg Timer
+          </button>
+        </div>
         <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-6">
           {[
             { 
@@ -854,7 +887,7 @@ export default function Alerts() {
               value: stats.avgResponseTime, 
               color: "from-[#00D9FF] to-[#8B5CF6]",
               filter: 'all' as const,
-              description: "Time to resolve alerts",
+              description: "Time to resolve alerts (sec/min/hr)",
               icon: Clock
             },
             { 
@@ -1422,9 +1455,14 @@ function InvestigationModal({ alert, onClose }: { alert: Alert; onClose: () => v
 
   useEffect(() => {
     if (alert.sessionId) {
-      axios.get(`${API_BASE}/sessions/${alert.sessionId}/details`)
+      axios.get(`/sessions/${alert.sessionId}/details`)
         .then(res => setSessionDetails(res.data))
-        .catch(err => console.error('Error fetching session details:', err));
+        .catch(err => {
+          // Silently ignore 404 - session details may not be available
+          if (err.response?.status !== 404) {
+            console.error('Error fetching session details:', err);
+          }
+        });
     }
   }, [alert.sessionId]);
 

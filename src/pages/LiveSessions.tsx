@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef } from 'react';
 import { io, Socket } from 'socket.io-client';
+import { api } from '../services/api';
 import { Play, Pause, Shield, MapPin, Clock, X, Download, Circle, Activity  } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import axios from 'axios';
@@ -26,8 +27,12 @@ interface ThreatIntel {
   commonCommands: { cmd: string; count: number }[];
 }
 
-const API_BASE = 'http://localhost:5001/api';
-const SOCKET_URL = 'http://localhost:5001';
+import { SOCKET_URL as SOCKET_BASE } from '../utils/constants';
+
+// API_BASE no longer needed; axios is configured globally with baseURL and auth
+// const API_BASE = API_BASE_URL;
+const SOCKET_URL = SOCKET_BASE; // exported above, see utils/constants
+
 
 export function LiveSessions() {
   const [sessions, setSessions] = useState<Session[]>([]);
@@ -214,17 +219,19 @@ export function LiveSessions() {
       setLoading(true);
       console.log('🔄 Fetching sessions with range:', timeRange);
       
-      const response = await axios.get(`${API_BASE}/sessions/live`, {
-        params: { range: timeRange }
-      });
+      const response = await api.getLiveSessions({ range: timeRange });
       
       console.log('✅ Received sessions:', response.data.length);
       
       setSessions(response.data);
       setError(null);
-    } catch (err) {
+    } catch (err: any) {
       console.error('❌ Error fetching sessions:', err);
-      setError('Failed to load sessions');
+      if (err.response?.status === 401) {
+        setError('Unauthorized – please log in again');
+      } else {
+        setError('Failed to load sessions');
+      }
     } finally {
       setLoading(false);
     }
@@ -232,7 +239,7 @@ export function LiveSessions() {
 
   const fetchSessionCommands = async (sessionId: string) => {
     try {
-      const response = await axios.get(`${API_BASE}/sessions/${sessionId}/commands`);
+      const response = await api.getSessionCommands(sessionId);
       const transformedCommands = response.data.commands.map((cmd: any, index: number) => ({
         id: index + 1,
         command: cmd.input,
@@ -1094,7 +1101,7 @@ function AttackReplayModal({ sessionId, commands, onClose, socket }: {
   useEffect(() => {
     const fetchLatest = async () => {
       try {
-        const response = await axios.get(`${API_BASE}/sessions/${sessionId}/commands`);
+        const response = await axios.get(`/sessions/${sessionId}/commands`);
         const latest = response.data.commands.map((cmd: any, i: number) => ({
           id: i + 1,
           command: cmd.input,
@@ -1116,7 +1123,7 @@ function AttackReplayModal({ sessionId, commands, onClose, socket }: {
     socket.on('session_updated', (updatedSession: any) => {
       if (updatedSession.sessionId !== sessionId) return;
       
-      axios.get(`${API_BASE}/sessions/${sessionId}/commands`)
+      axios.get(`/sessions/${sessionId}/commands`)
         .then(response => {
           const latest = response.data.commands.map((cmd: any, i: number) => ({
             id: i + 1,

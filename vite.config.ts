@@ -1,9 +1,10 @@
-import { defineConfig } from 'vite'
+import { defineConfig } from 'vitest/config' 
 import react from '@vitejs/plugin-react'
 import path from 'path'
 
 export default defineConfig({
   plugins: [react()],
+  
   
   resolve: {
     alias: {
@@ -85,12 +86,12 @@ export default defineConfig({
     
     proxy: {
       '/api': {
-        target: 'http://localhost:5001',  // ← Changed to 5001
+        target: 'http://localhost:5001',
         changeOrigin: true,
         secure: false,
       },
       '/ws': {
-        target: 'ws://localhost:5001',    // ← Changed to 5001
+        target: 'ws://localhost:5001',
         ws: true,
         changeOrigin: true,
       }

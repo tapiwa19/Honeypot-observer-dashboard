@@ -2,8 +2,6 @@ import { useState, useEffect } from 'react';
 import { Users, UserCheck, UserX, Shield, Mail, Calendar, Search } from 'lucide-react';
 import axios from 'axios';
 
-const API_BASE = 'http://localhost:5001/api';
-
 interface User {
   _id: string;
   username: string;
@@ -31,8 +29,8 @@ export function UsersManagement() {
       const headers = { Authorization: `Bearer ${token}` };
 
       const [usersRes, pendingRes] = await Promise.all([
-        axios.get(`${API_BASE}/auth/users`, { headers }),
-        axios.get(`${API_BASE}/auth/pending-users`, { headers })
+        axios.get(`/auth/users`, { headers }),
+        axios.get(`/auth/pending-users`, { headers })
       ]);
 
       setUsers(usersRes.data);
@@ -48,7 +46,7 @@ export function UsersManagement() {
     try {
       const token = localStorage.getItem('token');
       await axios.post(
-        `${API_BASE}/auth/approve-user/${userId}`,
+        `/auth/approve-user/${userId}`,
         {},
         { headers: { Authorization: `Bearer ${token}` } }
       );
@@ -66,7 +64,7 @@ export function UsersManagement() {
     
     try {
       const token = localStorage.getItem('token');
-      await axios.delete(`${API_BASE}/auth/reject-user/${userId}`, {
+      await axios.delete(`/auth/reject-user/${userId}`, {
         headers: { Authorization: `Bearer ${token}` }
       });
       
@@ -84,7 +82,7 @@ export function UsersManagement() {
     try {
       const token = localStorage.getItem('token');
       await axios.patch(
-        `${API_BASE}/auth/users/${userId}/role`,
+        `/auth/users/${userId}/role`,
         { role: newRole },
         { headers: { Authorization: `Bearer ${token}` } }
       );

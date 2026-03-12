@@ -1,9 +1,7 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { Play, Terminal, X, Pause } from "lucide-react";
 import { Socket } from 'socket.io-client';
 import axios from 'axios';
-
-const API_BASE = 'http://localhost:5001/api';
 
 interface AttackEntry {
   id: string;
@@ -18,14 +16,35 @@ interface AttackEntry {
   type: string;
   severity: string;
   details: string;
-  commands: string[];      // ✅ ALL commands as array
+  commands: string[];
   commandCount: number;
   firstSeen: string;
   lastSeen: string;
 }
 
-const getRiskColor = (severity: string) => {
-  switch (severity.toLowerCase()) {
+// ✅ Always returns a safe AttackEntry — no undefined fields ever
+function safeEntry(entry: Partial<AttackEntry>): AttackEntry {
+  return {
+    id: entry.id || Math.random().toString(36),
+    session: entry.session || null,
+    ip: entry.ip || 'unknown',
+    country: entry.country || 'Unknown',
+    flag: entry.flag || '',
+    timestamp: entry.timestamp || new Date().toISOString(),
+    protocol: entry.protocol || 'SSH',
+    status: entry.status || 'Ended',
+    type: entry.type || 'Attack Detected',
+    severity: entry.severity || 'medium',
+    details: entry.details || '',
+    commands: Array.isArray(entry.commands) ? entry.commands : [],
+    commandCount: typeof entry.commandCount === 'number' ? entry.commandCount : 0,
+    firstSeen: entry.firstSeen || entry.timestamp || new Date().toISOString(),
+    lastSeen: entry.lastSeen || entry.timestamp || new Date().toISOString(),
+  };
+}
+
+const getRiskColor = (severity?: string) => {
+  switch ((severity || '').toLowerCase()) {
     case "low":      return "#52B788";
     case "medium":   return "#FFA500";
     case "high":     return "#FF4D4D";
@@ -45,40 +64,28 @@ export function LiveAttackFeed({
   const [replayingAttack, setReplayingAttack] = useState<AttackEntry | null>(null);
   const [liveIndicator, setLiveIndicator] = useState(false);
 
-  // ✅ Check if already connected when component mounts
   useEffect(() => {
     if (!socket) return;
 
-    if (socket.connected) {
-      setLiveIndicator(true);
-    }
+    if (socket.connected) setLiveIndicator(true);
 
-    socket.on('connect', () => {
-      setLiveIndicator(true);
-    });
+    socket.on('connect', () => setLiveIndicator(true));
+    socket.on('disconnect', () => setLiveIndicator(false));
 
-    socket.on('disconnect', () => {
-      setLiveIndicator(false);
-    });
-
-    // ✅ New session - add or update in feed
     socket.on('new_session', (newSession: any) => {
       setAttacks(prev => {
         const existingIndex = prev.findIndex(a => a.session === newSession.sessionId);
-        
         if (existingIndex >= 0) {
-          // Update existing session
           const updated = [...prev];
-          updated[existingIndex] = {
+          updated[existingIndex] = safeEntry({
             ...updated[existingIndex],
-            commandCount: newSession.commands,
+            commandCount: newSession.commands || 0,
             lastSeen: newSession.timestamp,
             status: 'Active'
-          };
+          });
           return updated;
         } else {
-          // Add new session
-          const newAttack: AttackEntry = {
+          return [safeEntry({
             id: newSession.sessionId,
             session: newSession.sessionId,
             ip: newSession.ip,
@@ -97,25 +104,22 @@ export function LiveAttackFeed({
             commandCount: newSession.commands || 0,
             firstSeen: newSession.timestamp,
             lastSeen: newSession.timestamp
-          };
-          return [newAttack, ...prev.slice(0, 19)];
+          }), ...prev.slice(0, 19)];
         }
       });
     });
 
-    // ✅ Session updated - update command count
     socket.on('session_updated', (updatedSession: any) => {
       setAttacks(prev => prev.map(a => 
         a.session === updatedSession.sessionId
-          ? { ...a, commandCount: updatedSession.commands, lastSeen: updatedSession.timestamp, status: 'Active' }
+          ? safeEntry({ ...a, commandCount: updatedSession.commands || 0, lastSeen: updatedSession.timestamp, status: 'Active' })
           : a
       ));
     });
 
-    // ✅ Session closed - mark as ended
     socket.on('session_closed', (data: { sessionId: string }) => {
       setAttacks(prev => prev.map(a => 
-        a.session === data.sessionId ? { ...a, status: 'Ended' } : a
+        a.session === data.sessionId ? safeEntry({ ...a, status: 'Ended' }) : a
       ));
     });
 
@@ -128,39 +132,30 @@ export function LiveAttackFeed({
     };
   }, [socket]);
 
-  // ✅ Fetch and GROUP all events by session
   const fetchAttacks = async () => {
     try {
-      const response = await axios.get(`${API_BASE}/dashboard/attacks`);
+      const response = await axios.get(`/dashboard/attacks`);
       const now = Date.now();
-
       const sessionMap = new Map<string, AttackEntry>();
 
-      response.data.forEach((attack: any) => {
-        const sessionId = attack.session || attack.ip;
-        
+      (response.data || []).forEach((attack: any) => {
+        const sessionId = attack.session || attack.ip || 'unknown';
+
         if (sessionMap.has(sessionId)) {
           const existing = sessionMap.get(sessionId)!;
-          
-          // ✅ Add command to session's command list
-          if (attack.input) {
-            existing.commands.push(attack.input);
-          }
+          if (!Array.isArray(existing.commands)) existing.commands = [];
+          if (attack.input) existing.commands.push(String(attack.input));
           existing.commandCount = existing.commands.length;
-          existing.lastSeen = attack.timestamp;
-
-          // Update severity if more severe event found
+          existing.lastSeen = attack.timestamp || existing.lastSeen;
           if (attack.severity === 'critical') existing.severity = 'critical';
           else if (attack.severity === 'high' && existing.severity !== 'critical') existing.severity = 'high';
-
           const lastSeenTime = new Date(existing.lastSeen).getTime();
           existing.status = (now - lastSeenTime) / (1000 * 60) < 5 ? "Active" : "Ended";
-
         } else {
           const attackTime = new Date(attack.timestamp).getTime();
           const minutesAgo = (now - attackTime) / (1000 * 60);
-
-          sessionMap.set(sessionId, {
+          const cmds = attack.input ? [String(attack.input)] : [];
+          sessionMap.set(sessionId, safeEntry({
             id: attack.id,
             session: attack.session,
             ip: attack.ip,
@@ -172,11 +167,11 @@ export function LiveAttackFeed({
             type: attack.type || 'Attack Detected',
             severity: attack.severity || 'medium',
             details: attack.details || `Attack from ${attack.ip}`,
-            commands: attack.input ? [attack.input] : [],
-            commandCount: attack.input ? 1 : 0,
+            commands: cmds,
+            commandCount: cmds.length,
             firstSeen: attack.timestamp,
             lastSeen: attack.timestamp
-          });
+          }));
         }
       });
 
@@ -222,83 +217,88 @@ export function LiveAttackFeed({
             <p className="text-sm mt-2">Waiting for honeypot activity...</p>
           </div>
         ) : (
-          attacks.map((attack, index) => (
-            <div
-              key={attack.id}
-              className="bg-[#334155] rounded-lg p-4 border-l-4 hover:bg-[#3f4f64] transition-all"
-              style={{
-                borderLeftColor: getRiskColor(attack.severity),
-                animation: `fadeInLeft 0.5s ease-out ${index * 0.05}s both`
-              }}
-            >
-              <div className="flex items-start justify-between gap-3">
-                <div className="flex-1 min-w-0">
-                  {/* Header Row */}
-                  <div className="flex items-center gap-2 mb-2 flex-wrap">
-                    <span className="font-mono text-[#38B6FF] text-sm font-bold">{attack.ip}</span>
-                    <span className="text-xl">{attack.flag}</span>
-                    <span className="text-gray-400 text-xs">{attack.protocol}</span>
-                    <span
-                      className="text-xs px-2 py-0.5 rounded border"
-                      style={{
-                        backgroundColor: `${getRiskColor(attack.severity)}20`,
-                        color: getRiskColor(attack.severity),
-                        borderColor: getRiskColor(attack.severity)
-                      }}
-                    >
-                      {attack.type}
-                    </span>
-                    {attack.commandCount > 0 && (
-                      <span className="text-xs px-2 py-0.5 rounded bg-cyan-500/20 text-cyan-400 border border-cyan-500">
-                        {attack.commandCount} cmd{attack.commandCount !== 1 ? 's' : ''}
+          attacks.map((attack, index) => {
+            const cmds = Array.isArray(attack.commands) ? attack.commands : [];
+            const riskColor = getRiskColor(attack.severity);
+            return (
+              <div
+                key={attack.id || index}
+                className="bg-[#334155] rounded-lg p-4 border-l-4 hover:bg-[#3f4f64] transition-all"
+                style={{
+                  borderLeftColor: riskColor,
+                  animation: `fadeInLeft 0.5s ease-out ${index * 0.05}s both`
+                }}
+              >
+                <div className="flex items-start justify-between gap-3">
+                  <div className="flex-1 min-w-0">
+
+                    {/* Header */}
+                    <div className="flex items-center gap-2 mb-2 flex-wrap">
+                      <span className="font-mono text-[#38B6FF] text-sm font-bold">{attack.ip}</span>
+                      <span className="text-xl">{attack.flag}</span>
+                      <span className="text-gray-400 text-xs">{attack.protocol}</span>
+                      <span
+                        className="text-xs px-2 py-0.5 rounded border"
+                        style={{
+                          backgroundColor: `${riskColor}20`,
+                          color: riskColor,
+                          borderColor: riskColor
+                        }}
+                      >
+                        {attack.type}
                       </span>
-                    )}
+                      {cmds.length > 0 && (
+                        <span className="text-xs px-2 py-0.5 rounded bg-cyan-500/20 text-cyan-400 border border-cyan-500">
+                          {cmds.length} cmd{cmds.length !== 1 ? 's' : ''}
+                        </span>
+                      )}
+                    </div>
+
+                    {/* Commands Block */}
+                    <div className="font-mono text-sm mb-2 bg-black/30 rounded p-2 border border-gray-700">
+                      {cmds.length > 0 ? (
+                        <div className="space-y-1 max-h-[80px] overflow-y-auto">
+                          {cmds.map((cmd, i) => (
+                            <div key={i} className="text-green-400">
+                              <span className="text-gray-500 text-xs">[{i + 1}]</span> $ {cmd}
+                            </div>
+                          ))}
+                        </div>
+                      ) : (
+                        <span className="text-gray-400">{attack.details || 'Session activity'}</span>
+                      )}
+                    </div>
+
+                    {/* Footer */}
+                    <div className="flex items-center gap-3 text-xs text-gray-400">
+                      <span>{new Date(attack.firstSeen).toLocaleTimeString()}</span>
+                      {attack.status === "Active" ? (
+                        <span className="flex items-center gap-1 text-[#10B981] font-semibold">
+                          <span className="w-1.5 h-1.5 bg-[#10B981] rounded-full animate-pulse"></span>
+                          Active
+                        </span>
+                      ) : (
+                        <span className="text-gray-500">Ended</span>
+                      )}
+                      <span className="text-gray-500">
+                        Duration: {Math.floor((new Date(attack.lastSeen).getTime() - new Date(attack.firstSeen).getTime()) / 1000)}s
+                      </span>
+                    </div>
                   </div>
 
-                  {/* ✅ Show ALL commands grouped in one session block */}
-                  <div className="font-mono text-sm mb-2 bg-black/30 rounded p-2 border border-gray-700">
-                    {attack.commands?.length > 0 ? (
-                      <div className="space-y-1 max-h-[80px] overflow-y-auto">
-                        {attack.commands.map((cmd, i) => (
-                          <div key={i} className="text-green-400">
-                            <span className="text-gray-500 text-xs">[{i + 1}]</span> $ {cmd}
-                          </div>
-                        ))}
-                      </div>
-                    ) : (
-                      <span className="text-gray-400">{attack.details}</span>
-                    )}
-                  </div>
-
-                  {/* Footer Row */}
-                  <div className="flex items-center gap-3 text-xs text-gray-400">
-                    <span>{new Date(attack.firstSeen).toLocaleTimeString()}</span>
-                    {attack.status === "Active" ? (
-                      <span className="flex items-center gap-1 text-[#10B981] font-semibold">
-                        <span className="w-1.5 h-1.5 bg-[#10B981] rounded-full animate-pulse"></span>
-                        Active
-                      </span>
-                    ) : (
-                      <span className="text-gray-500">Ended</span>
-                    )}
-                    <span className="text-gray-500">
-                      Duration: {Math.floor((new Date(attack.lastSeen).getTime() - new Date(attack.firstSeen).getTime()) / 1000)}s
-                    </span>
-                  </div>
+                  <button
+                    onClick={() => setReplayingAttack(attack)}
+                    className="flex items-center gap-2 px-4 py-2 bg-cyan-500/20 text-cyan-400 rounded-lg hover:bg-cyan-500/30 transition-all text-sm border border-cyan-500 whitespace-nowrap"
+                    disabled={!attack.session}
+                    title={attack.session ? "Replay all commands from this session" : "No session data available"}
+                  >
+                    <Play className="w-4 h-4" />
+                    Replay
+                  </button>
                 </div>
-
-                <button 
-                  onClick={() => setReplayingAttack(attack)}
-                  className="flex items-center gap-2 px-4 py-2 bg-cyan-500/20 text-cyan-400 rounded-lg hover:bg-cyan-500/30 transition-all text-sm border border-cyan-500 whitespace-nowrap"
-                  disabled={!attack.session}
-                  title={attack.session ? "Replay all commands from this session" : "No session data available"}
-                >
-                  <Play className="w-4 h-4" />
-                  Replay
-                </button>
               </div>
-            </div>
-          ))
+            );
+          })
         )}
       </div>
 
@@ -314,8 +314,8 @@ export function LiveAttackFeed({
         )}
         <button
           onClick={() => {
-            const csv = attacks.map(a => 
-              `${a.ip},${a.country},${a.timestamp},${a.commandCount},${a.severity}`
+            const csv = attacks.map(a =>
+              `${a.ip},${a.country},${a.timestamp},${a.commandCount || 0},${a.severity}`
             ).join('\n');
             const blob = new Blob([`IP,Country,Timestamp,Commands,Severity\n${csv}`], { type: 'text/csv' });
             const url = URL.createObjectURL(blob);
@@ -338,61 +338,89 @@ export function LiveAttackFeed({
   );
 }
 
-// ✅ Replay Modal - fetches ALL commands from backend
+// Each line in the terminal has a type for coloring + content
+interface TerminalLine {
+  type: 'system' | 'login' | 'command' | 'failed' | 'separator' | 'meta';
+  content: string;
+  timestamp?: string;
+}
+
 function ReplayModal({ attack, onClose }: { attack: AttackEntry; onClose: () => void }) {
-  const [commandIndex, setCommandIndex] = useState(0);
+  const [stepIndex, setStepIndex] = useState(0);  // which line is currently shown
   const [isPlaying, setIsPlaying] = useState(true);
   const [speed, setSpeed] = useState(1);
-  const [commands, setCommands] = useState<string[]>([]);
+  const [lines, setLines] = useState<TerminalLine[]>([]);
   const [loading, setLoading] = useState(true);
+  const bottomRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     const fetchCommands = async () => {
       if (!attack.session) {
-        setCommands([
-          `$ ssh attacker@honeypot`,
-          `Connected to ${attack.ip}`,
-          attack.details || 'No commands recorded',
-          "$ exit",
-          "Connection closed."
+        setLines([
+          { type: 'system', content: '$ ssh root@honeypot -p 2222' },
+          { type: 'meta',   content: `Connecting from ${attack.ip} (${attack.country})...` },
+          { type: 'meta',   content: 'No session ID — cannot load command history.' },
         ]);
         setLoading(false);
         return;
       }
 
       try {
-        const response = await axios.get(`${API_BASE}/sessions/${attack.session}/commands`);
-        const sessionCommands = response.data.commands || [];
-        
-        if (sessionCommands.length > 0) {
-          setCommands([
-            `$ ssh attacker@honeypot`,
-            `Connected to ${attack.ip} (${attack.country})`,
-            `Session: ${attack.session}`,
-            ``,
-            ...sessionCommands.map((cmd: any, i: number) => 
-              `[${i + 1}/${sessionCommands.length}] $ ${cmd.input || cmd.command || 'unknown'}`
-            ),
-            ``,
-            "$ exit",
-            "Connection closed."
-          ]);
+        const response = await axios.get(`/sessions/${attack.session}/commands`);
+        // Filter to ONLY real command events
+        const allEvents: any[] = response.data.commands || [];
+        const cmdEvents = allEvents.filter((e: any) =>
+          e.eventid === 'cowrie.command.input' ||
+          e.eventid === 'cowrie.command.failed' ||
+          e.eventid === 'cowrie.login.success' ||
+          e.eventid === 'cowrie.login.failed' ||
+          e.type === 'cowrie.command.input' ||
+          e.type === 'cowrie.command.failed' ||
+          // fallback: if no eventid, use input field presence
+          (e.input !== undefined && e.input !== null)
+        );
+
+        const built: TerminalLine[] = [
+          { type: 'system',    content: '$ ssh root@honeypot -p 2222' },
+          { type: 'meta',      content: `Attacker IP  : ${attack.ip}` },
+          { type: 'meta',      content: `Country      : ${attack.country}` },
+          { type: 'meta',      content: `Session ID   : ${attack.session}` },
+          { type: 'meta',      content: `Started      : ${new Date(attack.firstSeen).toLocaleString()}` },
+          { type: 'meta',      content: `Duration     : ${Math.floor((new Date(attack.lastSeen).getTime() - new Date(attack.firstSeen).getTime()) / 1000)}s` },
+          { type: 'separator', content: '─'.repeat(52) },
+        ];
+
+        if (cmdEvents.length === 0) {
+          built.push({ type: 'meta', content: 'Attacker connected but ran no commands.' });
         } else {
-          setCommands([
-            `$ ssh attacker@honeypot`,
-            `Connected to ${attack.ip}`,
-            attack.details || 'Session established - no commands recorded',
-            "$ exit",
-            "Connection closed."
-          ]);
+          cmdEvents.forEach((e: any) => {
+            const cmd = e.input ?? e.command ?? '';
+            const time = e.timestamp ? new Date(e.timestamp).toLocaleTimeString() : '';
+            const isFailed = e.eventid === 'cowrie.command.failed' || e.type === 'cowrie.command.failed';
+            const isLogin  = e.eventid === 'cowrie.login.success'  || e.type === 'cowrie.login.success';
+            const isLoginFail = e.eventid === 'cowrie.login.failed' || e.type === 'cowrie.login.failed';
+
+            if (isLogin) {
+              built.push({ type: 'login', content: `[${time}] ✓ Login succeeded`, timestamp: time });
+            } else if (isLoginFail) {
+              built.push({ type: 'failed', content: `[${time}] ✗ Login failed`, timestamp: time });
+            } else if (isFailed) {
+              built.push({ type: 'failed',  content: `[${time}] $ ${cmd}  ← command not found`, timestamp: time });
+            } else if (cmd) {
+              built.push({ type: 'command', content: `[${time}] $ ${cmd}`, timestamp: time });
+            }
+          });
         }
-      } catch (error) {
-        console.error('Error fetching commands:', error);
-        setCommands([
-          `$ ssh attacker@honeypot`,
-          `Connected to ${attack.ip}`,
-          `Error loading session commands`,
-          "$ exit"
+
+        built.push({ type: 'separator', content: '─'.repeat(52) });
+        built.push({ type: 'system',   content: 'Connection closed.' });
+
+        setLines(built);
+      } catch (err) {
+        console.error('Error fetching session commands:', err);
+        setLines([
+          { type: 'system', content: '$ ssh root@honeypot -p 2222' },
+          { type: 'failed', content: 'Error: Could not load session data from backend.' },
         ]);
       } finally {
         setLoading(false);
@@ -402,32 +430,54 @@ function ReplayModal({ attack, onClose }: { attack: AttackEntry; onClose: () => 
     fetchCommands();
   }, [attack]);
 
+  // Auto-advance one line at a time
   useEffect(() => {
-    if (!isPlaying || commandIndex >= commands.length || loading) return;
-    const timer = setTimeout(() => {
-      setCommandIndex(prev => Math.min(prev + 1, commands.length));
-    }, 1000 / speed);
+    if (!isPlaying || stepIndex >= lines.length - 1 || loading) return;
+    const delay = lines[stepIndex]?.type === 'command' ? 1200 / speed : 300 / speed;
+    const timer = setTimeout(() => setStepIndex(prev => prev + 1), delay);
     return () => clearTimeout(timer);
-  }, [commandIndex, isPlaying, speed, commands.length, loading]);
+  }, [stepIndex, isPlaying, speed, lines.length, loading]);
+
+  // Auto-scroll
+  useEffect(() => {
+    bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [stepIndex]);
+
+  const finished = stepIndex >= lines.length - 1;
+  // Count only real command lines for the progress label
+  const totalCmds = lines.filter(l => l.type === 'command' || l.type === 'failed').length;
+  const shownCmds = lines.slice(0, stepIndex + 1).filter(l => l.type === 'command' || l.type === 'failed').length;
+
+  const lineColor = (type: TerminalLine['type']) => {
+    switch (type) {
+      case 'command':   return 'text-green-400';
+      case 'failed':    return 'text-red-400';
+      case 'login':     return 'text-yellow-300';
+      case 'system':    return 'text-cyan-400';
+      case 'separator': return 'text-gray-600';
+      case 'meta':      return 'text-gray-400';
+      default:          return 'text-gray-300';
+    }
+  };
 
   return (
     <div
-      className="fixed inset-0 bg-black/80 backdrop-blur-sm z-50 flex items-center justify-center p-4"
+      className="fixed inset-0 bg-black/85 backdrop-blur-sm z-50 flex items-center justify-center p-4"
       onClick={onClose}
     >
       <div
-        className="bg-gray-900 rounded-xl shadow-2xl max-w-3xl w-full max-h-[80vh] overflow-hidden border border-gray-700"
+        className="bg-gray-950 rounded-xl shadow-2xl max-w-3xl w-full max-h-[85vh] overflow-hidden border border-gray-700 flex flex-col"
         onClick={(e) => e.stopPropagation()}
       >
-        <div className="p-4 border-b border-gray-700 flex items-center justify-between">
+        {/* Title Bar */}
+        <div className="p-4 border-b border-gray-800 flex items-center justify-between bg-gray-900">
           <div className="flex items-center gap-3">
             <Terminal className="w-5 h-5 text-[#00D9FF]" />
             <div>
-              <h3 className="text-white font-bold">Session Replay</h3>
-              <p className="text-gray-400 text-sm font-mono">
+              <h3 className="text-white font-bold text-base">Session Replay</h3>
+              <p className="text-gray-400 text-xs font-mono mt-0.5">
                 {attack.ip} • {attack.country}
                 {attack.session && <span className="text-[#00D9FF]"> • {attack.session}</span>}
-                {attack.commandCount > 0 && <span className="text-yellow-400"> • {attack.commandCount} commands</span>}
               </p>
             </div>
           </div>
@@ -436,62 +486,69 @@ function ReplayModal({ attack, onClose }: { attack: AttackEntry; onClose: () => 
           </button>
         </div>
 
-        <div className="p-6 bg-black min-h-[400px] max-h-[500px] overflow-y-auto font-mono text-sm">
+        {/* Terminal Body */}
+        <div className="flex-1 p-5 bg-black overflow-y-auto font-mono text-sm min-h-[380px] max-h-[460px]">
           {loading ? (
-            <div className="flex items-center justify-center py-12">
-              <div className="animate-spin rounded-full h-8 w-8 border-4 border-cyan-500 border-t-transparent"></div>
+            <div className="flex items-center justify-center py-16">
+              <div className="animate-spin rounded-full h-8 w-8 border-4 border-cyan-500 border-t-transparent mr-3"></div>
+              <span className="text-gray-400">Loading session data...</span>
             </div>
           ) : (
             <>
-              {commands.slice(0, commandIndex + 1).map((cmd, index) => (
-                <div
-                  key={index}
-                  className={`mb-2 ${
-                    cmd.startsWith("[") || cmd.startsWith("$") ? "text-green-400" :
-                    cmd.includes("Session") || cmd.includes("Connected") ? "text-yellow-400" :
-                    cmd.includes("closed") || cmd.includes("Error") ? "text-gray-500" :
-                    "text-gray-300"
-                  }`}
-                >
-                  {cmd}
+              {lines.slice(0, stepIndex + 1).map((line, i) => (
+                <div key={i} className={`mb-1.5 leading-relaxed ${lineColor(line.type)}`}>
+                  {line.content}
                 </div>
               ))}
-              {commandIndex < commands.length && (
-                <span className="text-green-400 animate-pulse">▊</span>
+              {!finished && (
+                <span className="text-green-400 animate-pulse text-base">▊</span>
               )}
+              <div ref={bottomRef} />
             </>
           )}
         </div>
 
-        <div className="p-4 border-t border-gray-700 flex items-center justify-between bg-gray-900">
+        {/* Controls */}
+        <div className="p-4 border-t border-gray-800 bg-gray-900 flex items-center justify-between gap-4">
           <div className="flex items-center gap-3">
             <button
               onClick={() => setIsPlaying(!isPlaying)}
-              className="p-2 bg-[#00D9FF] text-white rounded-lg hover:bg-[#00B8D9] transition-colors"
-              disabled={loading}
+              disabled={loading || finished}
+              className="p-2 bg-[#00D9FF] text-white rounded-lg hover:bg-[#00B8D9] transition-colors disabled:opacity-40"
             >
-              {isPlaying ? <Pause className="w-4 h-4" /> : <Play className="w-4 h-4" />}
+              {isPlaying && !finished ? <Pause className="w-4 h-4" /> : <Play className="w-4 h-4" />}
             </button>
             <select
               value={speed}
               onChange={(e) => setSpeed(Number(e.target.value))}
-              className="px-3 py-2 bg-gray-800 border border-gray-700 text-white rounded-lg text-sm"
               disabled={loading}
+              className="px-3 py-1.5 bg-gray-800 border border-gray-700 text-white rounded-lg text-sm"
             >
-              <option value={0.5}>0.5x</option>
-              <option value={1}>1x</option>
-              <option value={2}>2x</option>
-              <option value={4}>4x</option>
+              <option value={0.5}>0.5×</option>
+              <option value={1}>1×</option>
+              <option value={2}>2×</option>
+              <option value={4}>4×</option>
             </select>
-            <span className="text-gray-400 text-sm">{commandIndex + 1} / {commands.length}</span>
+            {/* ✅ Fixed counter — shows real commands only, never overshoots */}
+            <span className="text-gray-400 text-sm">
+              {totalCmds > 0
+                ? `${shownCmds} / ${totalCmds} commands`
+                : finished ? 'Complete' : 'Replaying...'}
+            </span>
           </div>
-          <button
-            onClick={() => { setCommandIndex(0); setIsPlaying(true); }}
-            className="px-4 py-2 bg-gray-800 text-white rounded-lg hover:bg-gray-700 transition-colors text-sm"
-            disabled={loading}
-          >
-            Restart
-          </button>
+
+          <div className="flex items-center gap-2">
+            {finished && (
+              <span className="text-green-500 text-xs font-semibold">✓ Replay complete</span>
+            )}
+            <button
+              onClick={() => { setStepIndex(0); setIsPlaying(true); }}
+              disabled={loading}
+              className="px-4 py-1.5 bg-gray-800 text-white rounded-lg hover:bg-gray-700 transition-colors text-sm disabled:opacity-40"
+            >
+              Restart
+            </button>
+          </div>
         </div>
       </div>
     </div>

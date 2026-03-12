@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react';
+import axios from 'axios';
 import { 
   Brain, 
   User, 
@@ -19,9 +20,8 @@ import {
   TrendingDown
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
-import axios from 'axios';
-
-const API_BASE = 'http://localhost:5001/api';
+import { api } from '../services/api';
+import { processPatterns, processAttackerProfiles } from '../utils/behavioral';
 
 // ============================================
 // TYPESCRIPT INTERFACES
@@ -89,9 +89,9 @@ export default function BehavioralAnalytics() {
   const [vulnerabilities, setVulnerabilities] = useState<Vulnerability[]>([]);
   const [mitreTactics, setMitreTactics] = useState<MITRETactic[]>([]);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
   const [timelineData, setTimelineData] = useState<any[]>([]);
-  const [_liveSessions, setLiveSessions] = useState<any[]>([]);
-  
+
   const [selectedPattern, setSelectedPattern] = useState<Pattern | null>(null);
   const [selectedProfile, setSelectedProfile] = useState<AttackerProfile | null>(null);
   const [selectedVuln, setSelectedVuln] = useState<Vulnerability | null>(null);
@@ -108,146 +108,42 @@ export default function BehavioralAnalytics() {
   const fetchData = async () => {
     try {
       setLoading(true);
+      setError(null);
       
-      // Fetch behavioral analytics
-      const behavioralResponse = await axios.get(`${API_BASE}/analytics/behavioral`);
-      const data = behavioralResponse.data;
+      // Fetch behavioral analytics, timeline, and sessions in parallel
+      const [behavioralRes, timelineRes, sessionsRes] = await Promise.all([
+        axios.get('/analytics/behavioral'),
+        axios.get('/analytics/timeline', { params: { range: 'now-7d' } }),
+        api.getLiveSessions({ range: '24h' })
+      ]);
       
-      // Fetch timeline for pattern evolution
-      const timelineResponse = await axios.get(`${API_BASE}/analytics/timeline?range=now-7d`);
-      setTimelineData(timelineResponse.data || []);
-      
-      // Fetch live sessions for real-time profiling
-      const sessionsResponse = await axios.get(`${API_BASE}/sessions/live?range=24h`);
-      setLiveSessions(sessionsResponse.data || []);
+      const data = behavioralRes.data;
+      setTimelineData(timelineRes.data || []);
       
       // Process patterns with real-time trend analysis
-      const processedPatterns = await processPatterns(data.patterns || [], timelineResponse.data);
+      const processedPatterns = processPatterns(data.patterns || [], timelineRes.data);
       setPatterns(processedPatterns);
       
       // Process attacker profiles with session data
-      const processedProfiles = await processAttackerProfiles(
+      const processedProfiles = processAttackerProfiles(
         data.profiles || [], 
-        sessionsResponse.data || []
+        sessionsRes.data || []
       );
       setAttackerProfiles(processedProfiles);
       
       setVulnerabilities(data.vulnerabilities || []);
       setMitreTactics(data.mitre || []);
       
-    } catch (error) {
-      console.error('Error fetching behavioral data:', error);
+    } catch (err: any) {
+      console.error('Error fetching behavioral data:', err);
+      if (err.response?.status === 401) {
+        setError('Unauthorized – please log in again');
+      } else {
+        setError(err.message || 'Failed to load behavioral analytics');
+      }
     } finally {
       setLoading(false);
     }
-  };
-
-  /**
-   * Process patterns to add real-time trend analysis
-   */
-  const processPatterns = async (patterns: Pattern[], timelineData: any[]) => {
-    return patterns.map(pattern => {
-      // Calculate trend from timeline data
-      const recentData = timelineData.slice(-24); // Last 24 hours
-      const firstHalf = recentData.slice(0, 12).reduce((sum, d) => sum + d.attacks, 0);
-      const secondHalf = recentData.slice(12).reduce((sum, d) => sum + d.attacks, 0);
-      
-      let trend: 'rising' | 'falling' | 'stable' = 'stable';
-      if (secondHalf > firstHalf * 1.2) trend = 'rising';
-      else if (secondHalf < firstHalf * 0.8) trend = 'falling';
-      
-      // Generate time series data for this pattern
-      const timeSeriesData = recentData.map(d => ({
-        time: d.time,
-        count: Math.floor(Math.random() * pattern.occurrences / 10) // Simulated, replace with real data
-      }));
-      
-      return {
-        ...pattern,
-        trend,
-        timeSeriesData
-      };
-    });
-  };
-
-  /**
-   * Process attacker profiles with real session data
-   */
-  const processAttackerProfiles = async (profiles: AttackerProfile[], sessions: any[]) => {
-    // Group sessions by IP to create detailed profiles
-    const ipSessionMap = new Map<string, any[]>();
-    
-    sessions.forEach(session => {
-      const ip = session.ip;
-      if (!ipSessionMap.has(ip)) {
-        ipSessionMap.set(ip, []);
-      }
-      ipSessionMap.get(ip)?.push(session);
-    });
-    
-    // Enhance profiles with real data
-    return profiles.map((profile, index) => {
-      // Get sessions for this profile (match by index for demo, in production match by IP)
-      const ipSessions = Array.from(ipSessionMap.values())[index] || [];
-      
-      // Calculate tactics used based on session behavior
-      const tactics = determineTactics(ipSessions);
-      
-      // Calculate targeted services
-      const targetedServices = ['SSH', 'Telnet', 'FTP'].filter(() => Math.random() > 0.5);
-      
-      // Calculate average session duration
-      const avgSessionDuration = ipSessions.length > 0
-        ? Math.floor(ipSessions.reduce((sum, s) => sum + (s.duration || 0), 0) / ipSessions.length)
-        : 0;
-      
-      // Count unique commands
-      const uniqueCommands = ipSessions.reduce((sum, s) => sum + (s.commands || 0), 0);
-      
-      return {
-        ...profile,
-        tactics,
-        targetedServices,
-        avgSessionDuration,
-        uniqueCommands
-      };
-    });
-  };
-
-  /**
-   * Determine MITRE tactics based on session behavior
-   */
-  const determineTactics = (sessions: any[]) => {
-    const tactics: string[] = [];
-    
-    const totalCommands = sessions.reduce((sum, s) => sum + (s.commands || 0), 0);
-    const highRisk = sessions.some(s => s.risk >= 7);
-    
-    // Initial Access - always present for honeypot
-    tactics.push('Initial Access (T1078)');
-    
-    // Execution - if commands were run
-    if (totalCommands > 0) {
-      tactics.push('Execution (T1059)');
-    }
-    
-    // Persistence - if high risk or many commands
-    if (highRisk || totalCommands > 10) {
-      tactics.push('Persistence (T1136)');
-    }
-    
-    // Discovery - common in honeypots
-    if (totalCommands > 5) {
-      tactics.push('Discovery (T1082)');
-    }
-    
-    // Command and Control - if session lasted long
-    const longSession = sessions.some(s => s.duration > 300);
-    if (longSession) {
-      tactics.push('Command & Control (T1071)');
-    }
-    
-    return tactics;
   };
 
   useEffect(() => {
@@ -263,6 +159,24 @@ export default function BehavioralAnalytics() {
         <div className="text-center">
           <RefreshCw className="w-12 h-12 animate-spin text-[#00D9FF] mx-auto mb-4" />
           <p className="text-gray-400">Loading behavioral analytics...</p>
+        </div>
+      </div>
+    );
+  }
+
+  if (error) {
+    return (
+      <div className="min-h-screen bg-gradient-to-br from-gray-900 via-gray-800 to-black flex items-center justify-center p-6">
+        <div className="max-w-md w-full bg-red-500/10 border border-red-500/50 rounded-xl p-6 text-center">
+          <AlertTriangle className="w-12 h-12 text-red-400 mx-auto mb-4" />
+          <h2 className="text-xl font-bold text-red-400 mb-2">Error Loading Analytics</h2>
+          <p className="text-red-300 text-sm mb-4">{error}</p>
+          <button
+            onClick={() => { setError(null); fetchData(); }}
+            className="px-6 py-2 bg-[#00D9FF] text-white rounded-lg hover:bg-[#00D9FF]/80 transition-colors"
+          >
+            Retry
+          </button>
         </div>
       </div>
     );

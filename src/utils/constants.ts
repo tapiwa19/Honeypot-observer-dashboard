@@ -2,7 +2,15 @@
 import { AlertSolution } from '../types';
 
 export const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:5000/api';
-export const WS_URL = import.meta.env.VITE_WS_URL || 'ws://localhost:5000';
+
+// if a socket URL isn't provided explicitly, derive it from the API base (remove the `/api` suffix)
+export const SOCKET_URL =
+  import.meta.env.VITE_SOCKET_URL ||
+  API_BASE_URL.replace(/\/api$/, '');
+
+// legacy alias (used by older files) kept for backwards compatibility
+export const WS_URL = import.meta.env.VITE_WS_URL || SOCKET_URL;  
+
 
 // Elasticsearch Configuration (for reference)
 export const ES_CONFIG = {

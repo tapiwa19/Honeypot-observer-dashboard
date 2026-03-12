@@ -5,8 +5,6 @@ import { LineChart, Line, PieChart, Pie, Cell, XAxis, YAxis, CartesianGrid, Tool
 import axios from 'axios';
 import { motion, AnimatePresence } from 'framer-motion';
 
-const API_BASE = 'http://localhost:5001/api';
-
 // Types
 interface TimelineData {
   time: string;
@@ -52,6 +50,8 @@ export function Analytics() {
   const [timeline, setTimeline] = useState<TimelineData[]>([]);
   const [countries, setCountries] = useState<CountryData[]>([]);
   const [attackDistribution, setAttackDistribution] = useState<{ name: string; value: number; color: string }[]>([]);
+  // allow grouping by 'type' or 'country'
+  const [distributionType, setDistributionType] = useState<'type' | 'country'>('type');
   const [stats, setStats] = useState({
     totalAttacks: 0,
     uniqueIPs: 0,
@@ -62,7 +62,7 @@ export function Analytics() {
   // Fetch live sessions - THIS IS THE IMPORTANT PART
   const fetchLiveSessions = async () => {
     try {
-      const response = await axios.get(`${API_BASE}/sessions/live`);
+      const response = await axios.get(`/sessions/live`);
       const sessions: LiveSession[] = response.data;
       setLiveSessions(sessions);
       
@@ -88,25 +88,54 @@ export function Analytics() {
       console.log(`📊 [ANALYTICS] Fetching data for range: ${timeRange} → ${apiTimeRange}`);
 
       const [timelineRes, countriesRes, statsRes, distributionRes] = await Promise.all([
-        axios.get(`${API_BASE}/analytics/timeline?range=${apiTimeRange}`),
-        axios.get(`${API_BASE}/analytics/countries?range=${apiTimeRange}`),
-        axios.get(`${API_BASE}/analytics/stats?range=${apiTimeRange}`),
-        axios.get(`${API_BASE}/analytics/distribution?range=${apiTimeRange}`)
+        axios.get(`/analytics/timeline?range=${apiTimeRange}`),
+        axios.get(`/analytics/countries?range=${apiTimeRange}`),
+        axios.get(`/analytics/stats?range=${apiTimeRange}`),
+        axios.get(`/analytics/distribution?range=${apiTimeRange}&groupBy=${distributionType === 'country' ? 'src_country' : 'eventid'}`)
       ]);
       
       setTimeline(timelineRes.data);
       
       // ✅ FIX: Properly calculate percentages
-      const countriesData = countriesRes.data;
-      const totalCountryAttacks = countriesData.reduce((sum: number, c: CountryData) => sum + c.attacks, 0);
-      
-      const countriesWithPercentage = countriesData.map((c: CountryData) => ({
-        ...c,
-        percentage: totalCountryAttacks > 0 ? Math.round((c.attacks / totalCountryAttacks) * 100) : 0
-      }));
-      
-      setCountries(countriesWithPercentage);
+      const countriesData = countriesRes.data || [];
+console.log(`🗺️ [ANALYTICS] Raw countries data:`, countriesData);
+
+if (!Array.isArray(countriesData)) {
+  console.error('❌ [ANALYTICS] Countries data is not an array:', countriesData);
+  setCountries([]);
+  setAttackDistribution(distributionRes.data);
+  // ... rest of the code
+  return;
+}
+
+const totalCountryAttacks = countriesData.reduce((sum: number, c: any) => {
+  return sum + (Number(c.attacks) || 0);
+}, 0);
+
+console.log(`🗺️ [ANALYTICS] Total attacks: ${totalCountryAttacks}`);
+
+const countriesWithPercentage = countriesData.map((c: any) => {
+  const attacks = Number(c.attacks) || 0;
+  const percentage = totalCountryAttacks > 0 
+    ? Math.round((attacks / totalCountryAttacks) * 100) 
+    : 0;
+  
+  return {
+    country: c.country,
+    code: c.code,
+    flag: c.flag,
+    attacks: attacks,
+    percentage: percentage
+  };
+});
+
+console.log(`✅ [ANALYTICS] Processed ${countriesWithPercentage.length} countries`);
+setCountries(countriesWithPercentage);
       setAttackDistribution(distributionRes.data);
+      // if we're grouping by country, adjust stats topVector label
+      if (distributionType === 'country') {
+        setStats(prev => ({ ...prev, topVector: 'Countries' }));
+      }
       
       setStats({
         totalAttacks: statsRes.data.totalAttacks || 0,
@@ -136,7 +165,7 @@ export function Analytics() {
       setLoading(false);
     };
     loadData();
-  }, [timeRange]);
+  }, [timeRange, distributionType]);
 
   // Real-time updates - FETCH LIVE SESSIONS EVERY 5 SECONDS!
   useEffect(() => {
@@ -156,7 +185,7 @@ export function Analytics() {
       clearInterval(sessionInterval);
       clearInterval(dataInterval);
     };
-  }, [isRealTimeEnabled, timeRange]);
+  }, [isRealTimeEnabled, timeRange, distributionType]);
 
   if (loading) {
     return (
@@ -206,6 +235,14 @@ export function Analytics() {
             <option value="today">Today</option>
             <option value="7days">Last 7 days</option>
             <option value="30days">Last 30 days</option>
+          </select>
+          <select
+            value={distributionType}
+            onChange={(e) => setDistributionType(e.target.value as any)}
+            className="px-4 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white text-sm"
+          >
+            <option value="type">Attack Type</option>
+            <option value="country">Country</option>
           </select>
         </div>
       </div>

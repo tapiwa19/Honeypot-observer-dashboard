@@ -2,7 +2,9 @@ import { useState } from 'react';
 import { Shield, Eye, EyeOff, ArrowLeft } from 'lucide-react';
 import axios from 'axios';
 
-const API_BASE = 'http://localhost:5001/api';
+import { API_BASE_URL } from '../utils/constants';
+
+const API_BASE = API_BASE_URL;
 
 interface RegisterProps {
   onBackToLogin: () => void;
@@ -36,7 +38,7 @@ export function Register({ onBackToLogin }: RegisterProps) {
     setLoading(true);
 
     try {
-      await axios.post(`${API_BASE}/auth/register`, {
+      await axios.post(`/auth/register`, {
         username,
         email,
         password

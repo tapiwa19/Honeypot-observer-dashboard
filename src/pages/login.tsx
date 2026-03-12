@@ -1,8 +1,9 @@
 import { useState } from 'react';
 import { Shield, Eye, EyeOff } from 'lucide-react';
 import axios from 'axios';
+import { API_BASE_URL } from '../utils/constants';
 
-const API_BASE = 'http://localhost:5001/api';
+const API_BASE = API_BASE_URL;
 
 interface LoginProps {
   onLoginSuccess: (user: any, token: string) => void;
@@ -22,7 +23,7 @@ export function Login({ onLoginSuccess, onShowRegister }: LoginProps) {
     setLoading(true);
 
     try {
-      const response = await axios.post(`${API_BASE}/auth/login`, {
+      const response = await axios.post(`/auth/login`, {
         username,
         password
       });

@@ -4,8 +4,6 @@ import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
 import axios from 'axios';
 
-const API_BASE = 'http://localhost:5001/api';
-
 // Fix Leaflet default marker icon issue
 delete (L.Icon.Default.prototype as any)._getIconUrl;
 L.Icon.Default.mergeOptions({
@@ -137,7 +135,7 @@ export function WorldMap({ timeRange }: { timeRange: string }) {
         else if (timeRange === '30days') apiTimeRange = 'now-30d';
 
         console.log('🗺️ [WORLDMAP] Fetching map data for:', apiTimeRange);
-        const response = await axios.get(`${API_BASE}/analytics/countries?range=${apiTimeRange}`);
+        const response = await axios.get(`/analytics/countries?range=${apiTimeRange}`);
         
         console.log('🗺️ [WORLDMAP] Raw response:', response.data);
         console.log('🗺️ [WORLDMAP] Total countries received:', response.data.length);
