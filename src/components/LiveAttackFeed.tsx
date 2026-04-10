@@ -67,52 +67,52 @@ export function LiveAttackFeed({
   useEffect(() => {
     if (!socket) return;
 
-    if (socket.connected) setLiveIndicator(true);
-
     socket.on('connect', () => setLiveIndicator(true));
     socket.on('disconnect', () => setLiveIndicator(false));
 
-    socket.on('new_session', (newSession: any) => {
+    socket.on('new_session', (newSession: Record<string, unknown>) => {
       setAttacks(prev => {
-        const existingIndex = prev.findIndex(a => a.session === newSession.sessionId);
+        const sessionId = newSession.sessionId as string;
+        const existingIndex = prev.findIndex(a => a.session === sessionId);
         if (existingIndex >= 0) {
           const updated = [...prev];
           updated[existingIndex] = safeEntry({
             ...updated[existingIndex],
-            commandCount: newSession.commands || 0,
-            lastSeen: newSession.timestamp,
+            commandCount: (newSession.commands as number) || 0,
+            lastSeen: newSession.timestamp as string,
             status: 'Active'
           });
           return updated;
         } else {
+          const risk = newSession.risk as number;
           return [safeEntry({
-            id: newSession.sessionId,
-            session: newSession.sessionId,
-            ip: newSession.ip,
-            country: newSession.countryName || 'Unknown',
-            flag: newSession.country,
-            timestamp: newSession.timestamp,
+            id: sessionId,
+            session: sessionId,
+            ip: newSession.ip as string,
+            country: (newSession.countryName as string) || 'Unknown',
+            flag: newSession.country as string,
+            timestamp: newSession.timestamp as string,
             protocol: 'SSH',
             status: 'Active',
-            type: newSession.risk >= 8 ? 'Critical Attack' : 
-                  newSession.risk >= 6 ? 'High Risk' : 'Attack Detected',
-            severity: newSession.risk >= 8 ? 'critical' : 
-                      newSession.risk >= 6 ? 'high' : 
-                      newSession.risk >= 4 ? 'medium' : 'low',
-            details: `Attack from ${newSession.ip}`,
+            type: risk >= 8 ? 'Critical Attack' : 
+                  risk >= 6 ? 'High Risk' : 'Attack Detected',
+            severity: risk >= 8 ? 'critical' : 
+                      risk >= 6 ? 'high' : 
+                      risk >= 4 ? 'medium' : 'low',
+            details: `Attack from ${newSession.ip as string}`,
             commands: [],
-            commandCount: newSession.commands || 0,
-            firstSeen: newSession.timestamp,
-            lastSeen: newSession.timestamp
+            commandCount: (newSession.commands as number) || 0,
+            firstSeen: newSession.timestamp as string,
+            lastSeen: newSession.timestamp as string
           }), ...prev.slice(0, 19)];
         }
       });
     });
 
-    socket.on('session_updated', (updatedSession: any) => {
+    socket.on('session_updated', (updatedSession: Record<string, unknown>) => {
       setAttacks(prev => prev.map(a => 
-        a.session === updatedSession.sessionId
-          ? safeEntry({ ...a, commandCount: updatedSession.commands || 0, lastSeen: updatedSession.timestamp, status: 'Active' })
+        a.session === (updatedSession.sessionId as string)
+          ? safeEntry({ ...a, commandCount: (updatedSession.commands as number) || 0, lastSeen: updatedSession.timestamp as string, status: 'Active' })
           : a
       ));
     });
@@ -138,39 +138,39 @@ export function LiveAttackFeed({
       const now = Date.now();
       const sessionMap = new Map<string, AttackEntry>();
 
-      (response.data || []).forEach((attack: any) => {
-        const sessionId = attack.session || attack.ip || 'unknown';
+      (response.data || []).forEach((attack: Record<string, unknown>) => {
+        const sessionId = ((attack.session || attack.ip) as string) || 'unknown';
 
         if (sessionMap.has(sessionId)) {
           const existing = sessionMap.get(sessionId)!;
           if (!Array.isArray(existing.commands)) existing.commands = [];
           if (attack.input) existing.commands.push(String(attack.input));
           existing.commandCount = existing.commands.length;
-          existing.lastSeen = attack.timestamp || existing.lastSeen;
-          if (attack.severity === 'critical') existing.severity = 'critical';
-          else if (attack.severity === 'high' && existing.severity !== 'critical') existing.severity = 'high';
+          existing.lastSeen = (attack.timestamp as string) || existing.lastSeen;
+          if ((attack.severity as string) === 'critical') existing.severity = 'critical';
+          else if ((attack.severity as string) === 'high' && existing.severity !== 'critical') existing.severity = 'high';
           const lastSeenTime = new Date(existing.lastSeen).getTime();
           existing.status = (now - lastSeenTime) / (1000 * 60) < 5 ? "Active" : "Ended";
         } else {
-          const attackTime = new Date(attack.timestamp).getTime();
+          const attackTime = new Date(attack.timestamp as string | number).getTime();
           const minutesAgo = (now - attackTime) / (1000 * 60);
           const cmds = attack.input ? [String(attack.input)] : [];
           sessionMap.set(sessionId, safeEntry({
-            id: attack.id,
-            session: attack.session,
-            ip: attack.ip,
-            country: attack.country || 'Unknown',
-            flag: attack.flag,
-            timestamp: attack.timestamp,
+            id: attack.id as string,
+            session: attack.session as string | null,
+            ip: attack.ip as string,
+            country: ((attack.country as string) || 'Unknown'),
+            flag: attack.flag as string,
+            timestamp: attack.timestamp as string,
             protocol: "SSH",
             status: minutesAgo < 5 ? "Active" : "Ended",
-            type: attack.type || 'Attack Detected',
-            severity: attack.severity || 'medium',
-            details: attack.details || `Attack from ${attack.ip}`,
+            type: ((attack.type as string) || 'Attack Detected'),
+            severity: ((attack.severity as string) || 'medium'),
+            details: ((attack.details as string) || `Attack from ${attack.ip as string}`),
             commands: cmds,
             commandCount: cmds.length,
-            firstSeen: attack.timestamp,
-            lastSeen: attack.timestamp
+            firstSeen: attack.timestamp as string,
+            lastSeen: attack.timestamp as string
           }));
         }
       });
@@ -186,9 +186,15 @@ export function LiveAttackFeed({
   };
 
   useEffect(() => {
-    fetchAttacks();
+    // Defer initial fetch to avoid cascading renders
+    const timer = setTimeout(() => {
+      fetchAttacks();
+    }, 0);
     const interval = setInterval(fetchAttacks, 10000);
-    return () => clearInterval(interval);
+    return () => {
+      clearTimeout(timer);
+      clearInterval(interval);
+    };
   }, []);
 
   return (
@@ -368,8 +374,8 @@ function ReplayModal({ attack, onClose }: { attack: AttackEntry; onClose: () => 
       try {
         const response = await axios.get(`/sessions/${attack.session}/commands`);
         // Filter to ONLY real command events
-        const allEvents: any[] = response.data.commands || [];
-        const cmdEvents = allEvents.filter((e: any) =>
+        const allEvents: Array<Record<string, unknown>> = response.data.commands || [];
+        const cmdEvents = allEvents.filter((e: Record<string, unknown>) =>
           e.eventid === 'cowrie.command.input' ||
           e.eventid === 'cowrie.command.failed' ||
           e.eventid === 'cowrie.login.success' ||
@@ -393,12 +399,12 @@ function ReplayModal({ attack, onClose }: { attack: AttackEntry; onClose: () => 
         if (cmdEvents.length === 0) {
           built.push({ type: 'meta', content: 'Attacker connected but ran no commands.' });
         } else {
-          cmdEvents.forEach((e: any) => {
-            const cmd = e.input ?? e.command ?? '';
-            const time = e.timestamp ? new Date(e.timestamp).toLocaleTimeString() : '';
-            const isFailed = e.eventid === 'cowrie.command.failed' || e.type === 'cowrie.command.failed';
-            const isLogin  = e.eventid === 'cowrie.login.success'  || e.type === 'cowrie.login.success';
-            const isLoginFail = e.eventid === 'cowrie.login.failed' || e.type === 'cowrie.login.failed';
+          cmdEvents.forEach((e: Record<string, unknown>) => {
+            const cmd = ((e.input ?? e.command) || '') as string;
+            const time = e.timestamp ? new Date(e.timestamp as string | number).toLocaleTimeString() : '';
+            const isFailed = (e.eventid as string) === 'cowrie.command.failed' || (e.type as string) === 'cowrie.command.failed';
+            const isLogin  = (e.eventid as string) === 'cowrie.login.success'  || (e.type as string) === 'cowrie.login.success';
+            const isLoginFail = (e.eventid as string) === 'cowrie.login.failed' || (e.type as string) === 'cowrie.login.failed';
 
             if (isLogin) {
               built.push({ type: 'login', content: `[${time}] ✓ Login succeeded`, timestamp: time });
@@ -436,7 +442,7 @@ function ReplayModal({ attack, onClose }: { attack: AttackEntry; onClose: () => 
     const delay = lines[stepIndex]?.type === 'command' ? 1200 / speed : 300 / speed;
     const timer = setTimeout(() => setStepIndex(prev => prev + 1), delay);
     return () => clearTimeout(timer);
-  }, [stepIndex, isPlaying, speed, lines.length, loading]);
+  }, [stepIndex, isPlaying, speed, lines, loading]);
 
   // Auto-scroll
   useEffect(() => {

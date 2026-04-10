@@ -5,7 +5,7 @@ import 'leaflet/dist/leaflet.css';
 import axios from 'axios';
 
 // Fix Leaflet default marker icon issue
-delete (L.Icon.Default.prototype as any)._getIconUrl;
+delete (L.Icon.Default.prototype as unknown as Record<string, unknown>)._getIconUrl;
 L.Icon.Default.mergeOptions({
   iconRetinaUrl: 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.7.1/images/marker-icon-2x.png',
   iconUrl: 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.7.1/images/marker-icon.png',
@@ -142,22 +142,23 @@ export function WorldMap({ timeRange }: { timeRange: string }) {
         
         const unmapped: string[] = [];
         const locations: AttackLocation[] = response.data
-          .map((country: any) => {
-            const coords = countryCoords[country.country];
+          .map((country: Record<string, unknown>) => {
+            const countryName = country.country as string;
+            const coords = countryCoords[countryName];
             
             if (!coords || coords.lat === 0) {
-              unmapped.push(country.country);
-              console.log(`⚠️ [WORLDMAP] No coordinates for: ${country.country}`);
+              unmapped.push(countryName);
+              console.log(`⚠️ [WORLDMAP] No coordinates for: ${countryName}`);
               return null;
             }
             
-            console.log(`✅ [WORLDMAP] Mapped: ${country.country} → [${coords.lat}, ${coords.lng}] (${country.attacks} attacks)`);
+            console.log(`✅ [WORLDMAP] Mapped: ${countryName} → [${coords.lat}, ${coords.lng}] (${country.attacks} attacks)`);
             
             return {
               ip: 'Multiple IPs',
-              country: country.country,
-              flag: country.flag,
-              attacks: country.attacks,
+              country: countryName,
+              flag: country.flag as string,
+              attacks: country.attacks as number,
               lat: coords.lat,
               lng: coords.lng,
             };

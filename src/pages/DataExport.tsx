@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo, useRef } from 'react';
+import { useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import { 
   Download, 
   FileText, 
@@ -17,7 +17,7 @@ import {
   ShieldAlert
 } from 'lucide-react';
 import axios from 'axios';
-import { io, Socket } from 'socket.io-client';
+import { io } from 'socket.io-client';
 
 import { SOCKET_URL } from '../utils/constants';
 
@@ -66,9 +66,15 @@ export default function DataExport() {
   });
   
   const [exportHistory, setExportHistory] = useState<ExportHistoryItem[]>([]);
-  const [_socket, setSocket] = useState<Socket | null>(null);
 
-  const fetchData = async (timeRange?: string) => {
+  const showNotification = useCallback((message: string, type: 'success' | 'error' | 'warning' = 'success') => {
+    setToastMessage(message);
+    setToastType(type);
+    setShowToast(true);
+    setTimeout(() => setShowToast(false), 3000);
+  }, []);
+
+  const fetchData = useCallback(async (timeRange?: string) => {
     try {
       console.log('📊 [DATA EXPORT] Fetching real-time data...');
       
@@ -87,7 +93,7 @@ export default function DataExport() {
       console.log(`   📅 Time Range: ${statsRange} → ${range}`);
       
       const [
-        _dashboardStats,
+        ,
         timelineData, 
         allAttacksData,
         allCredentialsData,
@@ -103,19 +109,19 @@ export default function DataExport() {
       ]);
       
       const totalAttacks = allAttacksData.data?.length || 0;
-      const attacksToday = timelineData.data?.reduce((sum: number, d: any) => sum + d.attacks, 0) || 0;
+      const attacksToday = timelineData.data?.reduce((sum: number, d: Record<string, unknown>) => sum + (d.attacks as number || 0), 0) || 0;
       const credentialsCount = allCredentialsData.data?.length || 0;
       const sessionsCount = sessionsData.data?.length || 0;
       const countriesCount = countriesData.data?.length || 0;
       
       const now = Date.now();
       const last24h = now - (24 * 60 * 60 * 1000);
-      const sessionsToday = sessionsData.data?.filter((s: any) => {
-        const sessionTime = new Date(s.timestamp).getTime();
+      const sessionsToday = sessionsData.data?.filter((s: Record<string, unknown>) => {
+        const sessionTime = new Date(String(s.timestamp || '')).getTime();
         return sessionTime > last24h;
       }).length || 0;
       
-      const dataIntegrity = calculateDataIntegrity(allAttacksData.data, sessionsData.data);
+      const dataIntegrity = calculateDataIntegrity(allAttacksData.data);
       
       setStats({
         totalAttacks,
@@ -142,28 +148,29 @@ export default function DataExport() {
         integrity: dataIntegrity
       });
       
-    } catch (error: any) {
-      console.error('❌ [DATA EXPORT] Error fetching data:', error.message);
+    } catch (error: unknown) {
+      const err = error as { message?: string };
+      console.error('❌ [DATA EXPORT] Error fetching data:', err.message);
       showNotification('Failed to fetch real-time data', 'error');
     }
-  };
+  }, [dataTimeRange, showNotification]);
   
   /**
-   * ✅ FIXED: Removed unused 'issues' variable; prefixed unused 'sessions' param with _
+   * ✅ FIXED: Removed unused 'issues' variable; removed unused 'sessions' param
    */
-  const calculateDataIntegrity = (attacks: any[], _sessions: any[]): number => {
+  const calculateDataIntegrity = (attacks: Array<Record<string, unknown>>): number => {
     if (!attacks || attacks.length === 0) return 100;
     
     let score = 100;
     
     // Check for missing sessions
-    const sessionsWithAttacks = attacks.filter(a => a.session).length;
+    const sessionsWithAttacks = attacks.filter(a => (a.session as unknown) !== undefined).length;
     if (sessionsWithAttacks / attacks.length < 0.9) {
       score -= 10;
     }
     
     // Check for malformed data
-    const validTimestamps = attacks.filter(a => a.timestamp && !isNaN(new Date(a.timestamp).getTime())).length;
+    const validTimestamps = attacks.filter(a => a.timestamp && !isNaN(new Date(String(a.timestamp)).getTime())).length;
     if (validTimestamps / attacks.length < 0.95) {
       score -= 15;
     }
@@ -221,33 +228,24 @@ export default function DataExport() {
       fetchData(dataTimeRangeRef.current);
     });
 
-    setSocket(ws);
-
     return () => {
       console.log('🔌 [DATA EXPORT] Disconnecting WebSocket...');
       ws.disconnect();
     };
-  }, []);
+  }, [fetchData]);
 
   useEffect(() => {
     fetchData();
     loadExportHistory();
     
-    const interval = setInterval(fetchData, 30000);
+    const interval = setInterval(() => { fetchData(); }, 30000);
     return () => clearInterval(interval);
-  }, []);
+  }, [fetchData]);
 
   useEffect(() => {
     dataTimeRangeRef.current = dataTimeRange;
     fetchData(dataTimeRange);
-  }, [dataTimeRange]);
-
-  const showNotification = (message: string, type: 'success' | 'error' | 'warning' = 'success') => {
-    setToastMessage(message);
-    setToastType(type);
-    setShowToast(true);
-    setTimeout(() => setShowToast(false), 3000);
-  };
+  }, [dataTimeRange, fetchData]);
 
   const handleExport = async (dataType: string, format: string) => {
     try {
@@ -255,7 +253,7 @@ export default function DataExport() {
       console.log(`📥 [EXPORT] Starting ${dataType} export as ${format.toUpperCase()}...`);
       
       let endpoint = '';
-      let params: any = {};
+      let params: Record<string, unknown> = {};
       
       const timeRangeMap: Record<string, string> = {
         'today': 'now-1d',
@@ -299,7 +297,7 @@ export default function DataExport() {
       
       console.log(`   ✅ Fetched ${Array.isArray(rawData) ? rawData.length : 1} records`);
       
-      let processedData = processDataForExport(rawData, dataType);
+      const processedData = processDataForExport(rawData, dataType);
       
       const exportMetadata = {
         exportedAt: new Date().toISOString(),
@@ -322,7 +320,7 @@ export default function DataExport() {
           mimeType = 'text/csv;charset=utf-8;';
           fileExtension = 'csv';
           break;
-        case 'json':
+        case 'json': {
           const jsonExport = {
             metadata: exportMetadata,
             data: processedData
@@ -331,6 +329,7 @@ export default function DataExport() {
           mimeType = 'application/json';
           fileExtension = 'json';
           break;
+        }
         case 'xml':
           exportContent = convertToXML(processedData, dataType, exportMetadata);
           mimeType = 'application/xml';
@@ -372,15 +371,16 @@ export default function DataExport() {
       
       saveToHistory(newExport);
       
-    } catch (error: any) {
-      console.error('❌ [EXPORT] Error:', error);
-      showNotification(`Export failed: ${error.message}`, 'error');
+    } catch (error: unknown) {
+      const err = error as { message?: string };
+      console.error('❌ [EXPORT] Error:', err);
+      showNotification(`Export failed: ${err.message || 'Unknown error'}`, 'error');
     } finally {
       setIsExporting(false);
     }
   };
 
-  const processDataForExport = (rawData: any, dataType: string): any[] => {
+  const processDataForExport = (rawData: Array<Record<string, unknown>>, dataType: string): Array<Record<string, unknown>> => {
     if (!Array.isArray(rawData)) {
       return [rawData];
     }
@@ -411,7 +411,7 @@ export default function DataExport() {
           countries: Array.isArray(cred.countries) ? cred.countries.join(', ') : 'N/A',
           first_seen: cred.firstSeen,
           last_seen: cred.lastSeen,
-          risk_score: cred.success > 0 ? 'HIGH' : cred.attempts > 10 ? 'MEDIUM' : 'LOW'
+          risk_score: (cred.success as number) > 0 ? 'HIGH' : (cred.attempts as number) > 10 ? 'MEDIUM' : 'LOW'
         }));
         
       case 'sessions':
@@ -425,7 +425,7 @@ export default function DataExport() {
           status: session.status,
           timestamp: session.timestamp,
           time_ago: session.timeAgo,
-          threat_level: session.risk >= 8 ? 'CRITICAL' : session.risk >= 6 ? 'HIGH' : 'MEDIUM'
+          threat_level: (session.risk as number) >= 8 ? 'CRITICAL' : (session.risk as number) >= 6 ? 'HIGH' : 'MEDIUM'
         }));
         
       case 'geographic':
@@ -435,7 +435,7 @@ export default function DataExport() {
           total_attacks: geo.attacks,
           percentage_of_total: geo.percentage,
           flag_emoji: geo.flag,
-          threat_density: geo.attacks > 100 ? 'HIGH' : geo.attacks > 50 ? 'MEDIUM' : 'LOW'
+          threat_density: (geo.attacks as number) > 100 ? 'HIGH' : (geo.attacks as number) > 50 ? 'MEDIUM' : 'LOW'
         }));
         
       default:
@@ -443,7 +443,7 @@ export default function DataExport() {
     }
   };
 
-  const convertToCSV = (data: any[]): string => {
+  const convertToCSV = (data: Array<Record<string, unknown>>): string => {
     if (!data || data.length === 0) {
       return '';
     }
@@ -465,7 +465,7 @@ export default function DataExport() {
     return csvRows.join('\n');
   };
 
-  const convertToXML = (data: any[], rootName: string, metadata: any): string => {
+  const convertToXML = (data: Array<Record<string, unknown>>, rootName: string, metadata: Record<string, unknown>): string => {
     let xml = `<?xml version="1.0" encoding="UTF-8"?>\n<${rootName}_export>\n`;
     
     xml += '  <metadata>\n';
@@ -521,7 +521,8 @@ export default function DataExport() {
       const hashArray = Array.from(new Uint8Array(hashBuffer));
       const hashHex = hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
       return hashHex.substring(0, 12);
-    } catch (error) {
+    } catch {
+      // Fallback hash if crypto API fails
       let hash = 0;
       for (let i = 0; i < content.length; i++) {
         const char = content.charCodeAt(i);

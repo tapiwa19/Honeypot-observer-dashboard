@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { WorldMap } from '../components/WorldMap';
 import { TrendingUp, Shield, MapPin, BarChart3,  Activity, RefreshCw, Zap, Radio } from 'lucide-react';
 import { LineChart, Line, PieChart, Pie, Cell, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
@@ -35,7 +35,7 @@ interface LiveSession {
 
 type AnalyticsTab = 'overview' | 'geographic' | 'timeline' | 'patterns' | 'threats';
 
-export function Analytics() {
+export default function Analytics() {
   const [activeTab, setActiveTab] = useState<AnalyticsTab>('overview');
   const [timeRange, setTimeRange] = useState('7days');
   const [loading, setLoading] = useState(true);
@@ -77,7 +77,7 @@ export function Analytics() {
   };
 
   // Fetch all analytics data
-  const fetchAllData = async () => {
+  const fetchAllData = useCallback(async () => {
     try {
       // Convert timeRange to API format
       let apiTimeRange = 'now-24h';
@@ -108,13 +108,13 @@ if (!Array.isArray(countriesData)) {
   return;
 }
 
-const totalCountryAttacks = countriesData.reduce((sum: number, c: any) => {
+const totalCountryAttacks = countriesData.reduce((sum: number, c: CountryData) => {
   return sum + (Number(c.attacks) || 0);
 }, 0);
 
 console.log(`🗺️ [ANALYTICS] Total attacks: ${totalCountryAttacks}`);
 
-const countriesWithPercentage = countriesData.map((c: any) => {
+const countriesWithPercentage = countriesData.map((c: CountryData) => {
   const attacks = Number(c.attacks) || 0;
   const percentage = totalCountryAttacks > 0 
     ? Math.round((attacks / totalCountryAttacks) * 100) 
@@ -155,7 +155,7 @@ setCountries(countriesWithPercentage);
     } catch (err) {
       console.error('❌ [ANALYTICS] Error fetching data:', err);
     }
-  };
+  }, [timeRange, distributionType]);
 
   // Initial load
   useEffect(() => {
@@ -165,7 +165,7 @@ setCountries(countriesWithPercentage);
       setLoading(false);
     };
     loadData();
-  }, [timeRange, distributionType]);
+  }, [fetchAllData]);
 
   // Real-time updates - FETCH LIVE SESSIONS EVERY 5 SECONDS!
   useEffect(() => {
@@ -185,7 +185,7 @@ setCountries(countriesWithPercentage);
       clearInterval(sessionInterval);
       clearInterval(dataInterval);
     };
-  }, [isRealTimeEnabled, timeRange, distributionType]);
+  }, [isRealTimeEnabled, fetchAllData]);
 
   if (loading) {
     return (
@@ -238,7 +238,7 @@ setCountries(countriesWithPercentage);
           </select>
           <select
             value={distributionType}
-            onChange={(e) => setDistributionType(e.target.value as any)}
+            onChange={(e) => setDistributionType(e.target.value as 'type' | 'country')}
             className="px-4 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white text-sm"
           >
             <option value="type">Attack Type</option>
@@ -366,7 +366,7 @@ setCountries(countriesWithPercentage);
             />
           )}
           {activeTab === 'geographic' && <GeographicTab countries={countries} timeRange={timeRange} />}
-          {activeTab === 'timeline' && <TimelineTab timeline={timeline} stats={stats} />}
+          {activeTab === 'timeline' && <TimelineTab timeline={timeline} />}
           {activeTab === 'patterns' && <PatternsTab attackDistribution={attackDistribution} />}
           {activeTab === 'threats' && <ThreatsTab attackDistribution={attackDistribution} />}
         </motion.div>
@@ -612,7 +612,7 @@ function GeographicTab({ countries, timeRange }: { countries: CountryData[]; tim
 }
 
 // Timeline Tab - Real Data
-function TimelineTab({ timeline }: { timeline: TimelineData[]; stats: any }) {
+function TimelineTab({ timeline }: { timeline: TimelineData[] }) {
   const [timelineView, setTimelineView] = useState<'6h' | '1d' | 'all'>('all');
   
   const filteredTimeline = timelineView === 'all' ? timeline : 

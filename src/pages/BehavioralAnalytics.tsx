@@ -90,7 +90,7 @@ export default function BehavioralAnalytics() {
   const [mitreTactics, setMitreTactics] = useState<MITRETactic[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [timelineData, setTimelineData] = useState<any[]>([]);
+  const [timelineData, setTimelineData] = useState<Array<Record<string, unknown>>>([]);
 
   const [selectedPattern, setSelectedPattern] = useState<Pattern | null>(null);
   const [selectedProfile, setSelectedProfile] = useState<AttackerProfile | null>(null);
@@ -134,12 +134,13 @@ export default function BehavioralAnalytics() {
       setVulnerabilities(data.vulnerabilities || []);
       setMitreTactics(data.mitre || []);
       
-    } catch (err: any) {
-      console.error('Error fetching behavioral data:', err);
-      if (err.response?.status === 401) {
+    } catch (err: unknown) {
+      const error = err as { response?: { status?: number; data?: { message?: string } }; message?: string };
+      console.error('Error fetching behavioral data:', error);
+      if (error.response?.status === 401) {
         setError('Unauthorized – please log in again');
       } else {
-        setError(err.message || 'Failed to load behavioral analytics');
+        setError(error.message || 'Failed to load behavioral analytics');
       }
     } finally {
       setLoading(false);
@@ -222,7 +223,7 @@ export default function BehavioralAnalytics() {
             return (
               <button
                 key={tab.id}
-                onClick={() => setActiveTab(tab.id as any)}
+                onClick={() => setActiveTab(tab.id as 'patterns' | 'profiles' | 'vulnerabilities' | 'mitre')}
                 className={`px-4 py-2 rounded-lg font-medium transition whitespace-nowrap flex items-center gap-2 ${
                   activeTab === tab.id
                     ? 'bg-[#00D9FF]/10 text-[#00D9FF] border border-[#00D9FF]/30'
@@ -827,7 +828,7 @@ export default function BehavioralAnalytics() {
 /**
  * Real-time pattern evolution chart showing attack trends
  */
-function RealTimePatternChart({ patterns, timelineData }: { patterns: Pattern[]; timelineData: any[] }) {
+function RealTimePatternChart({ patterns, timelineData }: { patterns: Pattern[]; timelineData: Array<Record<string, unknown>> }) {
   if (!timelineData || timelineData.length === 0) {
     return (
       <div className="h-full flex items-center justify-center text-gray-500">
@@ -836,7 +837,7 @@ function RealTimePatternChart({ patterns, timelineData }: { patterns: Pattern[];
     );
   }
 
-  const maxAttacks = Math.max(...timelineData.map(d => d.attacks), 1);
+  const maxAttacks = Math.max(...timelineData.map(d => (d.attacks as number) || 0), 1);
   const width = 600;
   const height = 200;
   const padding = 40;
@@ -866,7 +867,7 @@ function RealTimePatternChart({ patterns, timelineData }: { patterns: Pattern[];
       {patterns.slice(0, 3).map((pattern, idx) => {
         const points = timelineData.map((d, i) => {
           const x = padding + (i / (timelineData.length - 1)) * (width - 2 * padding);
-          const normalizedValue = (d.attacks * (idx + 1) * 0.3) / maxAttacks;
+          const normalizedValue = ((d.attacks as number) * (idx + 1) * 0.3) / maxAttacks;
           const y = height - padding - normalizedValue * (height - 2 * padding);
           return `${x},${y}`;
         }).join(' ');
@@ -894,7 +895,7 @@ function RealTimePatternChart({ patterns, timelineData }: { patterns: Pattern[];
         const x = padding + (i * 4 / (timelineData.length - 1)) * (width - 2 * padding);
         return (
           <text key={i} x={x} y={height - 20} fill="#9CA3AF" fontSize="10" textAnchor="middle">
-            {d.time}
+            {d.time as string}
           </text>
         );
       })}

@@ -1,12 +1,10 @@
 import { useState } from 'react';
 import { Shield, Eye, EyeOff } from 'lucide-react';
 import axios from 'axios';
-import { API_BASE_URL } from '../utils/constants';
-
-const API_BASE = API_BASE_URL;
+import { User } from '../types';
 
 interface LoginProps {
-  onLoginSuccess: (user: any, token: string) => void;
+  onLoginSuccess: (user: User, token: string) => void;
    onShowRegister: () => void; 
 }
 
@@ -35,8 +33,9 @@ export function Login({ onLoginSuccess, onShowRegister }: LoginProps) {
       localStorage.setItem('user', JSON.stringify(user));
       
       onLoginSuccess(user, token);
-    } catch (err: any) {
-      setError(err.response?.data?.message || 'Login failed. Please check your credentials.');
+    } catch (err: unknown) {
+      const error = err as { response?: { data?: { message?: string } }; message?: string };
+      setError(error.response?.data?.message || 'Login failed. Please check your credentials.');
     } finally {
       setLoading(false);
     }

@@ -51,7 +51,7 @@ export function Dashboard({ onNavigate }: DashboardProps) {
   const [liveIndicator, setLiveIndicator] = useState(false);
   const [connectionHealth, setConnectionHealth] = useState({
     latency: 0,
-    lastHeartbeat: Date.now(),
+    lastHeartbeat: 0,
     reconnectAttempts: 0
   });
   const [ddosAlert, setDDoSAlert] = useState<{
@@ -89,7 +89,7 @@ export function Dashboard({ onNavigate }: DashboardProps) {
   // ✅ WebSocket setup
   useEffect(() => {
     console.log('🔌 [Dashboard] Initializing WebSocket...');
- 
+
     const socketConnection = io(SOCKET_URL, {
   transports: ['websocket', 'polling'],
   reconnection: true,
@@ -122,15 +122,16 @@ export function Dashboard({ onNavigate }: DashboardProps) {
     });
  
     // ✅ NEW SESSION — increment totalAttacks, re-fetch for accurate activeSessions
-    socketConnection.on('new_session', (newSession: any) => {
+    socketConnection.on('new_session', (newSession: Record<string, unknown>) => {
       console.log('🔴 [Dashboard] New session:', newSession);
  
       // Immediately bump total attacks so UI feels instant
+      const risk = newSession.risk as number || 0;
       setStats(prev => {
         let newThreatLevel = prev.threatLevel;
         const newTotal = prev.totalAttacks + 1;
-        if (newSession.risk >= 9) newThreatLevel = 'CRITICAL';
-        else if (newSession.risk >= 7) newThreatLevel = 'HIGH';
+        if (risk >= 9) newThreatLevel = 'CRITICAL';
+        else if (risk >= 7) newThreatLevel = 'HIGH';
         else if (newTotal > 200) newThreatLevel = 'HIGH';
         else if (newTotal > 50) newThreatLevel = 'MEDIUM';
  
@@ -147,7 +148,7 @@ export function Dashboard({ onNavigate }: DashboardProps) {
       setTimeout(() => fetchStats(), 1500);
     });
  
-    socketConnection.on('session_updated', (updatedSession: any) => {
+    socketConnection.on('session_updated', (updatedSession: Record<string, unknown>) => {
       console.log('🔄 [Dashboard] Session updated:', updatedSession.sessionId);
       // No stat changes needed for updates
     });
@@ -162,11 +163,11 @@ export function Dashboard({ onNavigate }: DashboardProps) {
  
     // ✅ FIX 4: threat_intel_update — only update countriesDetected if BIGGER
     // Before this fix, topAttackers (max 10 IPs) was overwriting the real count
-    socketConnection.on('threat_intel_update', (intel: any) => {
+    socketConnection.on('threat_intel_update', (intel: Record<string, unknown>) => {
       console.log('📊 [Dashboard] Threat intel update received');
- 
+
       const countries = new Set<string>();
-      intel.topAttackers?.forEach((attacker: any) => {
+      (intel.topAttackers as Array<{ country?: string }>)?.forEach((attacker) => {
         if (attacker.country) countries.add(attacker.country);
       });
  
@@ -180,14 +181,14 @@ export function Dashboard({ onNavigate }: DashboardProps) {
     });
  
     // DDoS warning
-    socketConnection.on('ddos_warning', (warning: any) => {
+    socketConnection.on('ddos_warning', (warning: Record<string, unknown>) => {
       console.log('⚠️ [Dashboard] DDoS warning:', warning);
- 
+
       if (!warning || !Array.isArray(warning.suspiciousIPs)) return;
- 
-      const sanitizedIPs = warning.suspiciousIPs
+
+      const sanitizedIPs = (warning.suspiciousIPs as Array<{ ip?: string; count?: number }>)
         .slice(0, 10)
-        .map((item: any) => ({
+        .map((item) => ({
           ip: String(item.ip || '').replace(/[<>'"]/g, '').slice(0, 45),
           count: Math.max(0, Math.min(100000, item.count || 0))
         }));
@@ -195,7 +196,7 @@ export function Dashboard({ onNavigate }: DashboardProps) {
       setDDoSAlert({
         active: true,
         suspiciousIPs: sanitizedIPs,
-        totalRequests: Math.max(0, warning.totalRequests || 0)
+        totalRequests: Math.max(0, (warning.totalRequests as number) || 0)
       });
  
       setTimeout(() => setDDoSAlert(null), 120000);
@@ -223,8 +224,12 @@ export function Dashboard({ onNavigate }: DashboardProps) {
       }
     }, 10000);
  
-    setSocket(socketConnection);
- 
+    // Store socket reference only after all listeners are set up
+    // We use this for passing to child components
+    socketConnection.once('connect', () => {
+      setSocket(socketConnection);
+    });
+
     return () => {
       clearTimeout(fallbackTimer);
       clearInterval(heartbeatInterval);
@@ -516,42 +521,61 @@ function RecentAlertsPanel({
   onNavigate: (page: string) => void;
   socket: Socket | null;
 }) {
-  const [alerts, setAlerts] = useState<any[]>([]);
+  const [alerts, setAlerts] = useState<Array<{
+    id: string;
+    time: string;
+    type: string;
+    priority: 'critical' | 'high' | 'medium' | 'low';
+    message: string;
+    ip: string;
+    country: string;
+    isNew: boolean;
+  }>>([]);
   const [loading, setLoading] = useState(true);
   const [liveIndicator, setLiveIndicator] = useState(false);
- 
+
   useEffect(() => {
     if (!socket) return;
- 
+
     if (socket.connected) setLiveIndicator(true);
- 
+
     socket.on('connect', () => setLiveIndicator(true));
     socket.on('disconnect', () => setLiveIndicator(false));
- 
-    socket.on('new_session', (newSession: any) => {
+
+    socket.on('new_session', (newSession: Record<string, unknown>) => {
       console.log('🔔 [Alerts] New session:', newSession);
- 
-      const newAlert = {
-        id: newSession.sessionId,
+      
+      const risk = newSession.risk as number || 0;
+      const newAlert: {
+        id: string;
+        time: string;
+        type: string;
+        priority: 'critical' | 'high' | 'medium' | 'low';
+        message: string;
+        ip: string;
+        country: string;
+        isNew: boolean;
+      } = {
+        id: String(newSession.sessionId || ''),
         // ✅ FIX 5: Use 'just now' directly — no formatTimeAgo needed for new events
         time: 'just now',
         type:
-          newSession.risk >= 8
+          risk >= 8
             ? 'Critical Attack'
-            : newSession.risk >= 6
+            : risk >= 6
             ? 'High Risk Attack'
             : 'Attack Detected',
         priority:
-          newSession.risk >= 8
+          risk >= 8
             ? 'critical'
-            : newSession.risk >= 6
+            : risk >= 6
             ? 'high'
-            : newSession.risk >= 4
+            : risk >= 4
             ? 'medium'
             : 'low',
-        message: `New attack from ${newSession.ip}`,
-        ip: newSession.ip,
-        country: newSession.country,
+        message: `New attack from ${String(newSession.ip || 'unknown')}`,
+        ip: String(newSession.ip || ''),
+        country: String(newSession.country || ''),
         isNew: true
       };
  
@@ -572,26 +596,27 @@ function RecentAlertsPanel({
   const fetchAlerts = async () => {
     try {
       const response = await api.getRecentAttacks();
-      const recentAlerts = response.data
-        .sort((a: any, b: any) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())
+      const recentAlerts = (response.data as Array<Record<string, unknown>>)
+        .sort((a, b) => new Date(String(b.timestamp)).getTime() - new Date(String(a.timestamp)).getTime())
         .slice(0, 4)
-        .map((attack: any) => {
+        .map((attack) => {
           // ✅ FIX 5: Only call formatTimeAgo if timestamp looks like a real ISO date
           // Your server already pre-formats some timestamps as "just now", "5m ago" etc.
           // If we run formatTimeAgo on those strings, we get "NaN ago" or wrong output
-          const isISODate = attack.timestamp && attack.timestamp.includes('T');
+          const timestamp = String(attack.timestamp || '');
+          const isISODate = timestamp.includes('T');
           const timeDisplay = isISODate
-            ? formatTimeAgo(attack.timestamp)
-            : attack.timestamp || 'unknown time';
+            ? formatTimeAgo(timestamp)
+            : timestamp || 'unknown time';
  
           return {
-            id: attack.id,
+            id: attack.id as string,
             time: timeDisplay,
-            type: attack.type || 'Unknown Attack',
-            priority: attack.severity || 'low',
-            message: attack.details || `Attack from ${attack.ip}`,
-            ip: attack.ip,
-            country: attack.flag,
+            type: attack.type as string || 'Unknown Attack',
+            priority: (attack.severity as string || 'low') as 'critical' | 'high' | 'medium' | 'low',
+            message: `Attack from ${attack.ip as string || 'unknown'}`,
+            ip: attack.ip as string,
+            country: attack.flag as string,
             isNew: false
           };
         });

@@ -77,7 +77,7 @@ app.use('/api/notifications', notificationRouter);
 // ✅ NEW: Register alert rules routes
 app.use('/api/alerts', alertRulesRouter);
 
-// ✅ FIXED: Only protect sensitive routes that modify data or require admin access
+//FIXED: Only protect sensitive routes that modify data or require admin access
 // Read-only analytics/data endpoints (dashboard, analytics, sessions, credentials) are PUBLIC
 // IMPORTANT: Define public endpoints BEFORE protected ones so Express matches them first
 app.use('/api/admin', authenticateToken, requireAdmin);
@@ -263,7 +263,7 @@ app.get('/api/dashboard/stats', async (req, res) => {
 
     
 
-    // ✅ FIX 1: Use extractAggs() helper to handle both ES client response formats
+    //  Use extractAggs() helper to handle both ES client response formats
     const aggs = extractAggs(countriesResponse);
     const uniqueCountries = new Set();
     (aggs.unique_ips?.buckets || []).forEach(bucket => {
@@ -665,8 +665,14 @@ app.get('/api/sessions/:sessionId/commands', async (req, res) => {
   } else if (s.eventid === 'cowrie.command.failed') {
     input = `[CMD NOT FOUND] ${s.input || s.message || '?'}`;
   } else {
-    input = s.input || s.message || 'unknown';
+  const raw = s.input;
+  if (typeof raw === 'string' && raw.trim() !== '') {
+    input = raw;
+  } else {
+    // s.input is a log object - real command is in message field
+    input = s.message || 'unknown';
   }
+}
 
   return {
     input,
@@ -1521,6 +1527,37 @@ app.get('/api/analytics/distribution', async (req, res) => {
   }
 });
 
+// AI calling endpoint
+app.post('/api/ai/analyze', async (req, res) => {
+  try {
+    const { prompt } = req.body;
+    console.log('📨 Prompt received:', prompt?.slice(0, 100));
+    
+    const response = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': process.env.ANTHROPIC_API_KEY,
+        'anthropic-version': '2023-06-01'
+      },
+      body: JSON.stringify({
+        model: 'claude-opus-4-6',
+        max_tokens: 1000,
+        messages: [{ role: 'user', content: prompt }]
+      })
+    });
+
+    const data = await response.json();
+    console.log('🤖 Full Anthropic response:', JSON.stringify(data, null, 2));
+    
+    const text = data.content?.[0]?.text || 'No response generated';
+    res.json({ text });
+  } catch (error) {
+    console.error('AI analysis error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // Settings
 app.get('/api/settings', async (req, res) => {
   try {
@@ -2154,24 +2191,15 @@ const startServer = async () => {
       console.log('ℹ️  Email credentials not found in .env');
     }
     
-    // Initialize Twilio (SMS & Phone)
-    if (process.env.TWILIO_ACCOUNT_SID && process.env.TWILIO_AUTH_TOKEN) {
-      const twilioSuccess = notificationService.initializeTwilio({
-        accountSid: process.env.TWILIO_ACCOUNT_SID,
-        authToken: process.env.TWILIO_AUTH_TOKEN,
-        phoneNumber: process.env.TWILIO_PHONE_NUMBER,
-        smsRecipients: (process.env.SMS_RECIPIENTS || '').split(',').filter(Boolean),
-        callRecipients: (process.env.CALL_RECIPIENTS || '').split(',').filter(Boolean)
-      });
-      
-      if (twilioSuccess) {
-        console.log('✅ Twilio (SMS & Phone) enabled');
-      } else {
-        console.log('⚠️  Twilio not configured');
-      }
-    } else {
-      console.log('ℹ️  Twilio credentials not found in .env');
-    }
+    // Initialize Ntfy
+if (process.env.NTFY_TOPIC) {
+  const ntfySuccess = notificationService.initializeNtfy(process.env.NTFY_TOPIC);
+  if (ntfySuccess) {
+    console.log('✅ Ntfy push notifications enabled');
+  }
+} else {
+  console.log('ℹ️  Ntfy topic not found in .env');
+}
     
     // Initialize Slack
     if (process.env.SLACK_WEBHOOK_URL) {
@@ -2218,7 +2246,7 @@ const startServer = async () => {
     console.log('🔔 Notification Endpoints:');
     console.log('   GET  /api/notifications/config');
     console.log('   POST /api/notifications/config/email');
-    console.log('   POST /api/notifications/config/twilio');
+    console.log('   POST /api/notifications/config/ntfy');
     console.log('   POST /api/notifications/config/slack');
     console.log('   POST /api/notifications/test/:channel');
     console.log('   POST /api/notifications/send');
@@ -2227,3 +2255,4 @@ const startServer = async () => {
 };
 
 startServer();
+ 

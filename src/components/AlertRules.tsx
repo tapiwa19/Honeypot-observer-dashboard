@@ -14,7 +14,7 @@ const api = {
   get: (url: string) => fetch(`${API_BASE_URL}${url}`, {
     headers: { 'Authorization': `Bearer ${localStorage.getItem('token')}` }
   }).then(r => r.json()),
-  post: (url: string, data: any) => fetch(`${API_BASE_URL}${url}`, {
+  post: (url: string, data: Record<string, unknown>) => fetch(`${API_BASE_URL}${url}`, {
     method: 'POST',
     headers: { 
       'Content-Type': 'application/json',
@@ -22,7 +22,7 @@ const api = {
     },
     body: JSON.stringify(data)
   }).then(r => r.json()),
-  put: (url: string, data: any) => fetch(`${API_BASE_URL}${url}`, {
+  put: (url: string, data: Record<string, unknown>) => fetch(`${API_BASE_URL}${url}`, {
     method: 'PUT',
     headers: { 
       'Content-Type': 'application/json',
@@ -30,7 +30,7 @@ const api = {
     },
     body: JSON.stringify(data)
   }).then(r => r.json()),
-  patch: (url: string, data: any) => fetch(`${API_BASE_URL}${url}`, {
+  patch: (url: string, data: Record<string, unknown>) => fetch(`${API_BASE_URL}${url}`, {
     method: 'PATCH',
     headers: { 
       'Content-Type': 'application/json',
@@ -137,7 +137,7 @@ export function AlertRules() {
       const endpoint = editing ? `/alerts/rules/${editing}` : `/alerts/rules`;
       const method = editing ? 'PUT' : 'POST';
 
-      const response = await api[method as keyof typeof api](endpoint, formData) as any;
+      const response = await api[method as keyof typeof api](endpoint, formData as unknown as Record<string, unknown>) as Record<string, unknown>;
 
       if (response.success) {
         await loadRules();
@@ -145,8 +145,9 @@ export function AlertRules() {
         setEditing(null);
         alert('✅ Rule saved successfully!');
       }
-    } catch (error: any) {
-      alert(`❌ Error saving rule: ${error.message || 'Unknown error'}`);
+    } catch (error: unknown) {
+      const err = error as { message?: string };
+      alert(`❌ Error saving rule: ${err.message || 'Unknown error'}`);
     } finally {
       setLoading(false);
     }
@@ -157,14 +158,15 @@ export function AlertRules() {
 
     setLoading(true);
     try {
-      const response = await api.delete(`/alerts/rules/${ruleId}`) as any;
+      const response = await api.delete(`/alerts/rules/${ruleId}`) as Record<string, unknown>;
 
       if (response.success) {
         await loadRules();
         alert('✅ Rule deleted!');
       }
-    } catch (error: any) {
-      alert(`❌ Error deleting rule: ${error.message || 'Unknown error'}`);
+    } catch (error: unknown) {
+      const err = error as { message?: string };
+      alert(`❌ Error deleting rule: ${err.message || 'Unknown error'}`);
     } finally {
       setLoading(false);
     }
@@ -173,12 +175,12 @@ export function AlertRules() {
   const handleToggleRule = async (ruleId: string, enabled: boolean) => {
     setLoading(true);
     try {
-      const response = await api.patch(`/alerts/rules/${ruleId}`, { enabled: !enabled }) as any;
+      const response = await api.patch(`/alerts/rules/${ruleId}`, { enabled: !enabled }) as Record<string, unknown>;
 
       if (response.success) {
         await loadRules();
       }
-    } catch (error: any) {
+    } catch (error: unknown) {
       console.error('Error toggling rule:', error);
     } finally {
       setLoading(false);
@@ -267,7 +269,7 @@ export function AlertRules() {
                   onChange={(e) =>
                     setFormData({
                       ...formData,
-                      trigger: { ...formData.trigger, type: e.target.value as any }
+                      trigger: { ...formData.trigger, type: e.target.value as 'brute_force' | 'command_execution' | 'credential_capture' | 'port_scan' | 'custom' }
                     })
                   }
                   className="w-full px-4 py-2 bg-gray-900 border border-gray-700 rounded-lg text-white focus:outline-none focus:border-[#00D9FF]"
@@ -328,7 +330,7 @@ export function AlertRules() {
                   <select
                     value={formData.severity}
                     onChange={(e) =>
-                      setFormData({ ...formData, severity: e.target.value as any })
+                      setFormData({ ...formData, severity: e.target.value as 'critical' | 'high' | 'medium' | 'low' })
                     }
                     className="w-full px-4 py-2 bg-gray-900 border border-gray-700 rounded-lg text-white focus:outline-none focus:border-[#00D9FF]"
                   >
@@ -359,7 +361,7 @@ export function AlertRules() {
                 <select
                   value={formData.throttle.type}
                   onChange={(e) =>
-                    setFormData({ ...formData, throttle: { ...formData.throttle, type: e.target.value as any } })
+                    setFormData({ ...formData, throttle: { ...formData.throttle, type: e.target.value as 'immediate' | 'batch_5min' | 'batch_30min' | 'batch_1hr' | 'daily_digest' } })
                   }
                   className="w-full px-4 py-2 bg-gray-900 border border-gray-700 rounded-lg text-white focus:outline-none focus:border-[#00D9FF]"
                 >
@@ -457,9 +459,10 @@ export function AlertRules() {
                       setFormData({
                         ...formData,
                         deduplication: {
-                          ...formData.deduplication,
-                          enabled: e.target.checked
-                        } as any
+                          enabled: e.target.checked,
+                          window: formData.deduplication?.window || 3600,
+                          groupBy: formData.deduplication?.groupBy || 'ip_eventtype'
+                        }
                       })
                     }
                     className="w-4 h-4 accent-[#00D9FF]"
@@ -480,9 +483,10 @@ export function AlertRules() {
                           setFormData({
                             ...formData,
                             deduplication: {
-                              ...formData.deduplication,
-                              window: parseInt(e.target.value)
-                            } as any
+                              enabled: formData.deduplication?.enabled || true,
+                              window: parseInt(e.target.value),
+                              groupBy: formData.deduplication?.groupBy || 'ip_eventtype'
+                          }
                           })
                         }
                         className="w-full px-3 py-2 bg-gray-900 border border-gray-700 rounded text-white text-sm focus:outline-none focus:border-[#00D9FF]"
@@ -496,9 +500,10 @@ export function AlertRules() {
                           setFormData({
                             ...formData,
                             deduplication: {
-                              ...formData.deduplication,
-                              groupBy: e.target.value as any
-                            } as any
+                              enabled: formData.deduplication?.enabled || true,
+                              window: formData.deduplication?.window || 3600,
+                              groupBy: e.target.value as 'ip' | 'ip_eventtype' | 'all'
+                            }
                           })
                         }
                         className="w-full px-3 py-2 bg-gray-900 border border-gray-700 rounded text-white text-sm focus:outline-none focus:border-[#00D9FF]"

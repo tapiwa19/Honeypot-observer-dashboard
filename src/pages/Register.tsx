@@ -2,10 +2,6 @@ import { useState } from 'react';
 import { Shield, Eye, EyeOff, ArrowLeft } from 'lucide-react';
 import axios from 'axios';
 
-import { API_BASE_URL } from '../utils/constants';
-
-const API_BASE = API_BASE_URL;
-
 interface RegisterProps {
   onBackToLogin: () => void;
 }
@@ -45,8 +41,9 @@ export function Register({ onBackToLogin }: RegisterProps) {
       });
 
       setSuccess(true);
-    } catch (err: any) {
-      setError(err.response?.data?.message || 'Registration failed. Please try again.');
+    } catch (err: unknown) {
+      const error = err as { response?: { data?: { message?: string } }; message?: string };
+      setError(error.response?.data?.message || 'Registration failed. Please try again.');
     } finally {
       setLoading(false);
     }

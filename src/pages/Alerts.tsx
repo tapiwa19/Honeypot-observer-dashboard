@@ -1,8 +1,8 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { X, Shield, Settings, Download, Check, AlertTriangle, Eye, Archive, Lightbulb, Clock, TrendingUp, Activity, Wifi, WifiOff } from 'lucide-react';
 import axios from 'axios';
 import { motion, AnimatePresence } from 'framer-motion';
-import { io, Socket } from 'socket.io-client';
+import { io } from 'socket.io-client';
 
 import { SOCKET_URL } from '../utils/constants';
 
@@ -29,7 +29,7 @@ interface Alert {
   resolvedBy?: string;
   archivedAt?: Date;
   commands?: string[];
-  evidenceData?: any;
+  evidenceData?: Record<string, unknown>;
   isNew?: boolean; // ✅ NEW: Flag for highlighting new real-time alerts
 }
 
@@ -209,12 +209,12 @@ const getPriorityColor = (priority: string) => {
   }
 };
 
-const calculateSeverity = (attack: any): 'critical' | 'high' | 'medium' | 'low' => {
+const calculateSeverity = (attack: Record<string, unknown>): 'critical' | 'high' | 'medium' | 'low' => {
   if (attack.severity) {
     return attack.severity as 'critical' | 'high' | 'medium' | 'low';
   }
   
-  const attackType = attack.type?.toLowerCase() || '';
+  const attackType = ((attack.type as string) || '').toLowerCase();
   
   if (attackType.includes('login.success')) return 'critical';
   if (attackType.includes('command.input') || attackType.includes('command') || attackType.includes('execution')) return 'critical';
@@ -225,8 +225,8 @@ const calculateSeverity = (attack: any): 'critical' | 'high' | 'medium' | 'low' 
   return 'low';
 };
 
-const determineAlertType = (attack: any): string => {
-  const eventId = attack.type?.toLowerCase() || '';
+const determineAlertType = (attack: Record<string, unknown>): string => {
+  const eventId = ((attack.type as string) || '').toLowerCase();
   
   if (eventId.includes('login.success')) return 'successful_login';
   if (eventId.includes('command.input') || eventId.includes('command')) return 'command_execution';
@@ -255,8 +255,8 @@ const formatTimeAgo = (timestamp: string) => {
   return `${Math.floor(seconds / 86400)}d ago`;
 };
 
-const getAlertTitle = (attack: any): string => {
-  const eventId = attack.type?.toLowerCase() || '';
+const getAlertTitle = (attack: Record<string, unknown>): string => {
+  const eventId = ((attack.type as string) || '').toLowerCase();
   
   if (eventId.includes('login.success')) {
     return '🚨 CRITICAL: Successful SSH Login';
@@ -277,10 +277,10 @@ const getAlertTitle = (attack: any): string => {
   return 'Security Event Detected';
 };
 
-const getAlertDescription = (attack: any): string => {
-  const eventId = attack.type?.toLowerCase() || '';
-  const ip = attack.ip || 'unknown';
-  const country = attack.country || 'Unknown';
+const getAlertDescription = (attack: Record<string, unknown>): string => {
+  const eventId = ((attack.type as string) || '').toLowerCase();
+  const ip = (attack.ip as string) || 'unknown';
+  const country = (attack.country as string) || 'Unknown';
   
   if (eventId.includes('login.success')) {
     return `IMMEDIATE ACTION REQUIRED: Attacker successfully authenticated from ${ip} (${country}). System may be compromised.`;
@@ -313,9 +313,9 @@ export default function Alerts() {
   const [error, setError] = useState<string | null>(null);
   const [showAllAlerts, setShowAllAlerts] = useState(false);
   const [currentSolution, setCurrentSolution] = useState<AttackSolution | null>(null);
+  const [showInvestigation, setShowInvestigation] = useState(false);
   
   // ✅ NEW: WebSocket state
-  const [_socket, setSocket] = useState<Socket | null>(null);
   const [wsConnected, setWsConnected] = useState(false);
   const [lastAlertSound, setLastAlertSound] = useState(0);
   
@@ -354,16 +354,21 @@ export default function Alerts() {
       condition: 'command contains malware'
     }
   ]);
+ const [, setTick] = useState(0);
 
+  useEffect(() => {
+    const interval = setInterval(() => setTick(t => t + 1), 60000);
+    return () => clearInterval(interval);
+  }, []);
   // ✅ NEW: Play alert sound (throttled)
-  const playAlertSound = () => {
+  const playAlertSound = useCallback(() => {
     const now = Date.now();
     if (now - lastAlertSound < 3000) return;
     
     setLastAlertSound(now);
     
     try {
-      const audioContext = new (window.AudioContext || (window as any).webkitAudioContext)();
+      const audioContext = new (window.AudioContext || (window as unknown as Record<string, unknown>).webkitAudioContext as typeof AudioContext)();
       const oscillator = audioContext.createOscillator();
       const gainNode = audioContext.createGain();
       
@@ -378,13 +383,13 @@ export default function Alerts() {
       
       oscillator.start(audioContext.currentTime);
       oscillator.stop(audioContext.currentTime + 0.5);
-    } catch (err) {
+    } catch {
       console.log('Audio playback not supported');
     }
-  };
+  }, [lastAlertSound]);
 
   // ✅ NEW: Show browser notification
-  const showBrowserNotification = (alert: Alert) => {
+  const showBrowserNotification = useCallback((alert: Alert) => {
     if ('Notification' in window && Notification.permission === 'granted') {
       new Notification(alert.title, {
         body: alert.description,
@@ -392,10 +397,10 @@ export default function Alerts() {
         badge: '🔔'
       });
     }
-  };
+  }, []);
 
   // ✅ NEW: Add real-time alert from WebSocket
-  const addRealtimeAlert = (alertData: Partial<Alert>) => {
+  const addRealtimeAlert = useCallback((alertData: Partial<Alert>) => {
     const newAlert: Alert = {
       id: alertData.id || `realtime-${Date.now()}`,
       title: alertData.title || 'Real-time Alert',
@@ -431,7 +436,7 @@ export default function Alerts() {
     }, 3000);
 
     console.log('🔴 [REALTIME] New alert added:', newAlert);
-  };
+  }, [playAlertSound, showBrowserNotification]);
 
   // ✅ NEW: WebSocket connection
   useEffect(() => {
@@ -459,57 +464,57 @@ export default function Alerts() {
       setWsConnected(true);
     });
 
-    ws.on('new_session', (sessionData: any) => {
+    ws.on('new_session', (sessionData: Record<string, unknown>) => {
       console.log('🚨 [WEBSOCKET] New session:', sessionData);
       
-      if (sessionData.risk >= 7) {
-        const severity = sessionData.risk >= 9 ? 'critical' : 'high';
+      const risk = (sessionData.risk as number) || 0;
+      if (risk >= 7) {
+        const severity = risk >= 9 ? 'critical' : 'high';
         
         addRealtimeAlert({
-          id: `session-${sessionData.sessionId}`,
+          id: `session-${sessionData.sessionId as string}`,
           severity,
           title: `${severity === 'critical' ? '🚨 CRITICAL' : '⚠️ HIGH RISK'} Attack Session`,
-          description: `New SSH attack from ${sessionData.ip} (${sessionData.countryName || sessionData.country}) - Risk: ${sessionData.risk}/10`,
-          sourceIp: sessionData.ip,
-          country: sessionData.countryName || sessionData.country,
-          flag: sessionData.country,
+          description: `New SSH attack from ${sessionData.ip as string} (${(sessionData.countryName as string) || (sessionData.country as string)}) - Risk: ${risk}/10`,
+          sourceIp: sessionData.ip as string,
+          country: (sessionData.countryName as string) || (sessionData.country as string),
+          flag: sessionData.country as string,
           type: 'command_execution',
-          sessionId: sessionData.sessionId
+          sessionId: sessionData.sessionId as string
         });
       }
     });
 
-    ws.on('new_attack', (attackData: any) => {
+    ws.on('new_attack', (attackData: Record<string, unknown>) => {
       console.log('🔥 [WEBSOCKET] New attack:', attackData);
       
-      const isCritical = attackData.type === 'cowrie.login.success' || 
-                        attackData.type === 'cowrie.session.file_download' ||
-                        attackData.type === 'cowrie.command.input';
+      const attackType = attackData.type as string;
+      const isCritical = attackType === 'cowrie.login.success' || 
+                        attackType === 'cowrie.session.file_download' ||
+                        attackType === 'cowrie.command.input';
       
       if (isCritical) {
-        const severity = (attackData.type === 'cowrie.login.success' || 
-                         attackData.type === 'cowrie.session.file_download') 
+        const severity = (attackType === 'cowrie.login.success' || 
+                         attackType === 'cowrie.session.file_download') 
                          ? 'critical' : 'high';
         
         addRealtimeAlert({
           severity,
           title: getAlertTitle(attackData),
           description: getAlertDescription(attackData),
-          sourceIp: attackData.ip,
-          country: attackData.country,
-          flag: attackData.flag,
+          sourceIp: attackData.ip as string,
+          country: attackData.country as string,
+          flag: attackData.flag as string,
           type: determineAlertType(attackData)
         });
       }
     });
 
-    setSocket(ws);
-
     return () => {
       console.log('🔌 [WEBSOCKET] Cleaning up...');
       ws.disconnect();
     };
-  }, []);
+  }, [addRealtimeAlert]);
 
   // ✅ NEW: Request notification permission
   useEffect(() => {
@@ -522,33 +527,33 @@ export default function Alerts() {
     }
   }, []);
 
-  const fetchAlerts = async () => {
+  const fetchAlerts = useCallback(async () => {
     try {
       setError(null);
       
       const response = await axios.get(`/dashboard/attacks`);
       
-      const convertedAlerts: Alert[] = response.data.map((attack: any, index: number) => {
+      const convertedAlerts: Alert[] = response.data.map((attack: Record<string, unknown>, index: number) => {
         const severity = calculateSeverity(attack);
         const alertType = determineAlertType(attack);
         const title = getAlertTitle(attack);
         const description = getAlertDescription(attack);
         
-        const attackTimestamp = attack.timestamp || new Date().toISOString();
+        const attackTimestamp = (attack.timestamp as string) || new Date().toISOString();
         const status = isAttackActive(attackTimestamp) ? 'active' : 'resolved';
         
         return {
-          id: attack.id || `alert-${index}`,
+          id: (attack.id as string) || `alert-${index}`,
           title,
           description,
           severity,
-          sourceIp: attack.ip || 'unknown',
-          country: attack.country || 'Unknown',
-          flag: attack.flag || '🌍',
-          timestamp: formatTimeAgo(attackTimestamp),
+          sourceIp: (attack.ip as string) || 'unknown',
+          country: (attack.country as string) || 'Unknown',
+          flag: (attack.flag as string) || '🌍',
+          timestamp: attackTimestamp,
           status,
           type: alertType,
-          sessionId: attack.session,
+          sessionId: attack.session as string,
           attackTime: new Date(attackTimestamp),
           commands: []
         };
@@ -609,11 +614,12 @@ export default function Alerts() {
         critical: criticalAlerts.length
       });
       
-    } catch (error: any) {
+    } catch (error: unknown) {
+      const err = error as { message?: string };
       console.error('Error fetching alerts:', error);
-      setError(error.message || 'Failed to fetch alerts');
+      setError(err.message || 'Failed to fetch alerts');
     }
-  };
+  }, [statsResetAt]);
 
   const fetchSessionCommands = async (sessionId: string) => {
     try {
@@ -666,19 +672,20 @@ export default function Alerts() {
   };
 
   const handleViewSolution = (alert: Alert) => {
-    const solution = ATTACK_SOLUTIONS[alert.type] || ATTACK_SOLUTIONS['default'];
-    setCurrentSolution(solution);
-    setShowSolution(true);
-  };
+  const solution = ATTACK_SOLUTIONS[alert.type] || ATTACK_SOLUTIONS['default'];
+  setCurrentSolution(solution);
+  setSelectedAlert(alert);  // ← add this line
+  setShowSolution(true);
+};
 
   const handleInvestigate = async (alert: Alert) => {
-    if (alert.sessionId) {
-      const commands = await fetchSessionCommands(alert.sessionId);
-      alert.commands = commands.map((c: any) => c.input || c.command);
-    }
-    
-    setSelectedAlert(alert);
-  };
+  if (alert.sessionId) {
+    const commands = await fetchSessionCommands(alert.sessionId);
+    alert.commands = commands.map((c: Record<string, unknown>) => (c.input as string) || (c.command as string));
+  }
+  setSelectedAlert(alert);
+  setShowInvestigation(true);  // ← add this
+};
 
   const toggleRule = (ruleId: string) => {
     setAlertRules(alertRules.map(rule => 
@@ -749,7 +756,7 @@ export default function Alerts() {
   useEffect(() => {
     fetchAlerts();
     // ✅ REMOVED polling - WebSocket handles real-time updates now!
-  }, [statsResetAt]);
+  }, [statsResetAt, fetchAlerts]);
 
   const resetStats = () => {
     setStatsResetAt(Date.now());
@@ -1012,7 +1019,11 @@ export default function Alerts() {
                                 </span>
                               )}
                             </h3>
-                            <span className="text-gray-500 text-xs">{alert.timestamp}</span>
+                          <span className="text-gray-500 text-xs">
+  {alert.timestamp === 'Just now' 
+    ? 'Just now' 
+    : formatTimeAgo(alert.timestamp)}
+</span>
                           </div>
                           <p className="text-gray-400 text-sm mb-2">{alert.description}</p>
                           <div className="flex items-center gap-4 text-xs flex-wrap">
@@ -1223,24 +1234,27 @@ export default function Alerts() {
 
         {/* Modals */}
         <AnimatePresence>
-          {showSolution && currentSolution && (
-            <SolutionModal 
-              solution={currentSolution}
-              onClose={() => {
-                setShowSolution(false);
-                setCurrentSolution(null);
-              }} 
-            />
-          )}
-        </AnimatePresence>
+         {showSolution && currentSolution && selectedAlert && (
+  <SolutionModal 
+    alert={selectedAlert}
+    onClose={() => {
+      setShowSolution(false);
+      setCurrentSolution(null);
+      setSelectedAlert(null);  // ← add this
+    }} 
+  />
+)}
 
-        <AnimatePresence>
-          {selectedAlert && (
-            <InvestigationModal 
-              alert={selectedAlert} 
-              onClose={() => setSelectedAlert(null)} 
-            />
-          )}
+{showInvestigation && selectedAlert && (   // ← changed condition
+  <InvestigationModal 
+    alert={selectedAlert} 
+    onClose={() => {
+      setSelectedAlert(null);
+      setShowInvestigation(false);  // ← add this
+    }} 
+  />
+)}
+       
         </AnimatePresence>
 
         <AnimatePresence>
@@ -1253,73 +1267,154 @@ export default function Alerts() {
   );
 }
 
-// Modal components remain EXACTLY the same as your original...
-// (Copy SolutionModal, InvestigationModal, and RuleConfigModal from document #4)
+function SolutionModal({ alert, onClose }: { 
+  alert: Alert;
+  onClose: () => void 
+}) {
+  const [aiResponse, setAiResponse] = useState<string>('');
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
 
-// ============================================
-// MODAL COMPONENTS (from your original code)
-// ============================================
+  useEffect(() => {
+    const generateSolution = async () => {
+      setLoading(true);
+      setError(null);
 
-function SolutionModal({ solution, onClose }: { solution: AttackSolution; onClose: () => void }) {
+      const commandsText = alert.commands && alert.commands.length > 0
+        ? `Commands the attacker ran:\n${alert.commands.map(c => `  $ ${c}`).join('\n')}`
+        : 'No commands executed in this session.';
+
+      const prompt = `You are a cybersecurity incident responder analyzing a real honeypot attack.
+
+Attack details:
+- Event type: ${alert.type}
+- Severity: ${alert.severity.toUpperCase()}
+- Attacker IP: ${alert.sourceIp}
+- Country: ${alert.country}
+- Status: ${alert.status}
+- Description: ${alert.description}
+${commandsText}
+
+Based on these SPECIFIC details, provide a focused incident response plan. Structure your response exactly like this:
+
+## What happened
+One paragraph explaining exactly what this attacker did based on the event type and commands.
+
+## Immediate actions
+Numbered list of 4-6 specific steps to take RIGHT NOW, referencing the actual IP address and commands where relevant.
+
+## What to check
+3-4 specific things to investigate based on what this attacker actually did (e.g. if they ran wget, check for downloaded files).
+
+## Prevention
+3-4 targeted prevention measures specific to this attack vector.
+
+Keep it concise and technical. Reference the actual data (IP, commands, event type) — do not give generic advice.`;
+
+      try {
+        const response = await fetch('/api/ai/analyze', {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({ prompt })
+});
+
+const data = await response.json();
+setAiResponse(data.text || 'No response generated');
+        
+          
+          
+     } catch (err) {
+  console.error('AI solution error:', err);
+  const fallback = ATTACK_SOLUTIONS[alert.type] || ATTACK_SOLUTIONS['default'];
+  setAiResponse(
+    `## What happened\n${alert.description}\n\n` +
+    `## Immediate actions\n${fallback.immediateSteps.map((s, i) => `${i+1}. ${s}`).join('\n')}\n\n` +
+    `## Prevention\n${fallback.prevention.map(s => `- ${s}`).join('\n')}\n\n` +
+    `## Tools needed\n${fallback.toolsNeeded.map(s => `- ${s}`).join('\n')}`
+  );
+} finally {
+  setLoading(false);
+}
+    };
+
+    generateSolution();
+  }, [alert]);
+
+  const renderMarkdown = (text: string) => {
+    return text
+      .split('\n')
+      .map((line, i) => {
+        if (line.startsWith('## ')) {
+          return (
+            <h3 key={i} style={{ 
+              fontSize: '15px', fontWeight: 500, 
+              margin: '1.25rem 0 0.5rem', 
+              color: 'var(--color-text-primary)' 
+            }}>
+              {line.replace('## ', '')}
+            </h3>
+          );
+        }
+        if (/^\d+\./.test(line)) {
+          const num = line.match(/^(\d+)\./)?.[1];
+          const content = line.replace(/^\d+\.\s*/, '');
+          return (
+            <div key={i} style={{ 
+              display: 'flex', gap: '8px', 
+              alignItems: 'flex-start', 
+              margin: '6px 0', fontSize: '14px',
+              color: 'var(--color-text-primary)'
+            }}>
+              <span style={{ 
+                background: 'var(--color-background-danger)', 
+                color: 'var(--color-text-danger)',
+                fontSize: '11px', padding: '2px 6px', 
+                borderRadius: '4px', whiteSpace: 'nowrap',
+                marginTop: '2px', flexShrink: 0
+              }}>{num}</span>
+              <span>{content}</span>
+            </div>
+          );
+        }
+        if (line.startsWith('- ')) {
+          return (
+            <div key={i} style={{ 
+              display: 'flex', gap: '8px', 
+              margin: '4px 0', fontSize: '14px',
+              color: 'var(--color-text-primary)'
+            }}>
+              <span style={{ color: 'var(--color-text-secondary)', flexShrink: 0 }}>•</span>
+              <span>{line.replace('- ', '')}</span>
+            </div>
+          );
+        }
+        if (line.trim() === '') return <div key={i} style={{ height: '4px' }} />;
+        return (
+          <p key={i} style={{ 
+            fontSize: '14px', margin: '4px 0', lineHeight: '1.6',
+            color: 'var(--color-text-primary)'
+          }}>
+            {line}
+          </p>
+        );
+      });
+  };
+
   const handlePrint = () => {
     const printWindow = window.open('', '_blank');
     if (!printWindow) return;
-    
     printWindow.document.write(`
-      <html>
-        <head>
-          <title>${solution.title} - Security Response Guide</title>
-          <style>
-            body { font-family: Arial, sans-serif; padding: 20px; max-width: 800px; margin: 0 auto; }
-            h1 { color: #DC2626; border-bottom: 3px solid #DC2626; padding-bottom: 10px; }
-            h2 { color: #2563EB; margin-top: 30px; }
-            .critical-note { background: #FEE2E2; border-left: 4px solid #DC2626; padding: 15px; margin: 20px 0; }
-            .step { background: #F3F4F6; padding: 10px; margin: 10px 0; border-radius: 5px; }
-            .step-number { background: #2563EB; color: white; padding: 5px 10px; border-radius: 50%; margin-right: 10px; }
-            ul { list-style: none; padding: 0; }
-            li { margin: 10px 0; }
-            .tools { background: #DBEAFE; padding: 15px; border-radius: 5px; margin: 20px 0; }
-          </style>
-        </head>
-        <body>
-          <h1>${solution.title}</h1>
-          <p><strong>Attack Type:</strong> ${solution.type}</p>
-          
-          ${solution.criticalityNote ? `
-            <div class="critical-note">
-              <strong>⚠️ CRITICAL WARNING:</strong><br>
-              ${solution.criticalityNote}
-            </div>
-          ` : ''}
-          
-          <h2>Immediate Action Steps</h2>
-          <ul>
-            ${solution.immediateSteps.map((step, i) => `
-              <li class="step">
-                <span class="step-number">${i + 1}</span>
-                ${step}
-              </li>
-            `).join('')}
-          </ul>
-          
-          <h2>Prevention Strategy</h2>
-          <ul>
-            ${solution.prevention.map(item => `<li>• ${item}</li>`).join('')}
-          </ul>
-          
-          <h2>Required Tools</h2>
-          <div class="tools">
-            ${solution.toolsNeeded.map(tool => `<div><strong>${tool.split(' - ')[0]}</strong> - ${tool.split(' - ')[1] || ''}</div>`).join('')}
-          </div>
-          
-          <p style="margin-top: 40px; color: #6B7280; font-size: 12px;">
-            Generated: ${new Date().toLocaleString()}<br>
-            Honeypot Observer - Security Incident Response Guide
-          </p>
-        </body>
-      </html>
+      <html><head><title>AI Incident Response — ${alert.sourceIp}</title>
+      <style>body{font-family:Arial,sans-serif;padding:20px;max-width:800px;margin:0 auto;}
+      h1{color:#DC2626;}h2{color:#2563EB;margin-top:1.5rem;}
+      pre{background:#f5f5f5;padding:10px;border-radius:4px;}
+      </style></head><body>
+      <h1>AI Incident Response Plan</h1>
+      <p><strong>IP:</strong> ${alert.sourceIp} | <strong>Severity:</strong> ${alert.severity.toUpperCase()} | <strong>Type:</strong> ${alert.type}</p>
+      <pre>${aiResponse}</pre>
+      <p style="color:#999;font-size:12px;margin-top:2rem;">Generated ${new Date().toLocaleString()} — Honeypot Observer</p>
+      </body></html>
     `);
-    
     printWindow.document.close();
     printWindow.print();
   };
@@ -1336,111 +1431,85 @@ function SolutionModal({ solution, onClose }: { solution: AttackSolution; onClos
         initial={{ scale: 0.9, opacity: 0 }}
         animate={{ scale: 1, opacity: 1 }}
         exit={{ scale: 0.9, opacity: 0 }}
-        className="bg-white rounded-2xl shadow-2xl max-w-4xl w-full max-h-[85vh] overflow-hidden"
+        className="bg-white rounded-2xl shadow-2xl max-w-3xl w-full max-h-[85vh] overflow-hidden flex flex-col"
         onClick={(e) => e.stopPropagation()}
       >
+        {/* Header */}
         <div className="p-6 border-b border-gray-200 flex items-start justify-between bg-gradient-to-r from-red-50 to-orange-50">
           <div>
-            <div className="flex items-center gap-2 mb-2">
-              <Lightbulb className="w-6 h-6 text-[#00D9FF]" />
-              <h2 className="text-2xl font-bold text-gray-900">{solution.title}</h2>
+            <div className="flex items-center gap-2 mb-1">
+              <Lightbulb className="w-5 h-5 text-[#00D9FF]" />
+              <h2 className="text-xl font-bold text-gray-900">AI Incident Response</h2>
+              {loading && (
+                <span className="px-2 py-0.5 bg-blue-100 text-blue-700 text-xs rounded-full animate-pulse">
+                  Analyzing...
+                </span>
+              )}
             </div>
-            <p className="text-gray-600">Attack Type: {solution.type}</p>
+            <div className="flex items-center gap-3 text-sm text-gray-500">
+              <span className="font-mono text-red-600">{alert.sourceIp}</span>
+              <span>•</span>
+              <span>{alert.country}</span>
+              <span>•</span>
+              <span className={`font-bold ${
+                alert.severity === 'critical' ? 'text-red-600' :
+                alert.severity === 'high' ? 'text-orange-600' : 'text-yellow-600'
+              }`}>
+                {alert.severity.toUpperCase()}
+              </span>
+            </div>
           </div>
-          <button
-            onClick={onClose}
-            className="p-2 hover:bg-white rounded-lg transition-colors"
-          >
+          <button onClick={onClose} className="p-2 hover:bg-white rounded-lg transition-colors">
             <X className="w-5 h-5 text-gray-500" />
           </button>
         </div>
 
-        <div className="p-6 overflow-y-auto max-h-[calc(85vh-180px)]">
-          {solution.criticalityNote && (
-            <div className="mb-6 p-4 bg-red-50 border-l-4 border-red-600 rounded-r-lg">
-              <div className="flex items-start gap-3">
-                <AlertTriangle className="w-6 h-6 text-red-600 flex-shrink-0 mt-1" />
-                <div>
-                  <h3 className="font-bold text-red-900 mb-1">⚠️ CRITICAL WARNING</h3>
-                  <p className="text-red-800">{solution.criticalityNote}</p>
-                </div>
-              </div>
-            </div>
-          )}
-
-          <div className="mb-6">
-            <h3 className="text-lg font-bold text-gray-900 mb-3 flex items-center gap-2">
-              <Shield className="w-5 h-5 text-blue-600" />
-              Immediate Action Steps
-            </h3>
-            <div className="space-y-2">
-              {solution.immediateSteps.map((step, index) => (
-                <div key={index} className="flex gap-3 p-3 bg-blue-50 rounded-lg border border-blue-200">
-                  <div className="flex-shrink-0 w-7 h-7 bg-blue-600 text-white rounded-full flex items-center justify-center text-sm font-bold">
-                    {index + 1}
-                  </div>
-                  <p className="text-gray-700 text-sm flex-1">{step}</p>
-                </div>
+        {/* Commands context bar */}
+        {alert.commands && alert.commands.length > 0 && (
+          <div className="px-6 py-3 bg-gray-900 border-b border-gray-700">
+            <div className="text-xs text-gray-400 mb-1">Commands executed in this session</div>
+            <div className="font-mono text-xs text-green-400 space-y-0.5 max-h-16 overflow-y-auto">
+              {alert.commands.slice(0, 5).map((cmd, i) => (
+                <div key={i}>$ {cmd}</div>
               ))}
+              {alert.commands.length > 5 && (
+                <div className="text-gray-500">+{alert.commands.length - 5} more</div>
+              )}
             </div>
           </div>
+        )}
 
-          <div className="mb-6">
-            <h3 className="text-lg font-bold text-gray-900 mb-3 flex items-center gap-2">
-              <Shield className="w-5 h-5 text-green-600" />
-              Prevention Strategy
-            </h3>
-            <div className="bg-green-50 rounded-lg border border-green-200 p-4">
-              <ul className="space-y-2">
-                {solution.prevention.map((item, index) => (
-                  <li key={index} className="flex gap-2 text-gray-700 text-sm">
-                    <span className="text-green-600 font-bold">•</span>
-                    <span>{item}</span>
-                  </li>
-                ))}
-              </ul>
+        {/* Content */}
+        <div className="flex-1 overflow-y-auto p-6">
+          {loading ? (
+            <div className="flex flex-col items-center justify-center py-16 gap-4">
+              <div className="animate-spin rounded-full h-10 w-10 border-4 border-[#00D9FF] border-t-transparent" />
+              <p className="text-gray-500 text-sm">Analyzing attack data and generating response plan...</p>
             </div>
-          </div>
-
-          <div>
-            <h3 className="text-lg font-bold text-gray-900 mb-3 flex items-center gap-2">
-              <Settings className="w-5 h-5 text-purple-600" />
-              Required Tools
-            </h3>
-            <div className="bg-purple-50 rounded-lg border border-purple-200 p-4">
-              <div className="space-y-2">
-                {solution.toolsNeeded.map((tool, index) => {
-                  const [name, description] = tool.split(' - ');
-                  return (
-                    <div key={index} className="flex gap-2">
-                      <span className="font-bold text-purple-700">{name}</span>
-                      {description && (
-                        <>
-                          <span className="text-gray-400">-</span>
-                          <span className="text-gray-600">{description}</span>
-                        </>
-                      )}
-                    </div>
-                  );
-                })}
-              </div>
+          ) : error ? (
+            <div className="p-4 bg-red-50 border border-red-200 rounded-lg text-red-700 text-sm">
+              {error}
             </div>
-          </div>
+          ) : (
+            <div>{renderMarkdown(aiResponse)}</div>
+          )}
         </div>
 
-        <div className="p-6 border-t border-gray-200 flex gap-3">
+        {/* Footer */}
+        <div className="p-4 border-t border-gray-200 flex gap-3">
           <button
             onClick={onClose}
-            className="flex-1 px-4 py-3 bg-gradient-to-r from-[#00D9FF] to-[#8B5CF6] text-white rounded-lg hover:shadow-lg transition-all font-bold"
+            className="flex-1 px-4 py-2.5 bg-gradient-to-r from-[#00D9FF] to-[#8B5CF6] text-white rounded-lg font-bold hover:shadow-lg transition-all"
           >
-            Got It, Thanks!
+            Got It
           </button>
-          <button 
+          <button
             onClick={handlePrint}
-            className="px-4 py-3 bg-gray-100 text-gray-700 rounded-lg hover:bg-gray-200 transition-colors flex items-center gap-2"
+            disabled={loading}
+            className="px-4 py-2.5 bg-gray-100 text-gray-700 rounded-lg hover:bg-gray-200 transition-colors flex items-center gap-2 disabled:opacity-50"
           >
             <Download className="w-4 h-4" />
-            Print Guide
+            Print
           </button>
         </div>
       </motion.div>
@@ -1451,7 +1520,7 @@ function SolutionModal({ solution, onClose }: { solution: AttackSolution; onClos
 function InvestigationModal({ alert, onClose }: { alert: Alert; onClose: () => void }) {
   const [activeTab, setActiveTab] = useState<"overview" | "timeline" | "evidence" | "notes">("overview");
   const [notes, setNotes] = useState('');
-  const [sessionDetails, setSessionDetails] = useState<any>(null);
+  const [sessionDetails, setSessionDetails] = useState<Record<string, unknown> | null>(null);
 
   useEffect(() => {
     if (alert.sessionId) {
@@ -1537,9 +1606,9 @@ function InvestigationModal({ alert, onClose }: { alert: Alert; onClose: () => v
               <h2>Session Information</h2>
               <table>
                 <tr><th>Session ID</th><td>${sessionDetails.sessionId}</td></tr>
-                <tr><th>Commands</th><td>${sessionDetails.commands?.length || 0}</td></tr>
-                <tr><th>Duration</th><td>${sessionDetails.behaviorProfile?.sessionDuration || 0}s</td></tr>
-                <tr><th>Skill Level</th><td>${sessionDetails.behaviorProfile?.skillLevel || 'Unknown'}</td></tr>
+                <tr><th>Commands</th><td>${(sessionDetails as Record<string, unknown>).commands ? (((sessionDetails as Record<string, unknown>).commands as unknown[])?.length || 0) : 0}</td></tr>
+                <tr><th>Duration</th><td>${(((sessionDetails as Record<string, unknown>).behaviorProfile as Record<string, unknown>)?.sessionDuration) || 0}s</td></tr>
+                <tr><th>Skill Level</th><td>${(((sessionDetails as Record<string, unknown>).behaviorProfile as Record<string, unknown>)?.skillLevel) || 'Unknown'}</td></tr>
               </table>
             </div>
           ` : ''}
@@ -1606,7 +1675,7 @@ function InvestigationModal({ alert, onClose }: { alert: Alert; onClose: () => v
           ].map((tab) => (
             <button
               key={tab.id}
-              onClick={() => setActiveTab(tab.id as any)}
+              onClick={() => setActiveTab(tab.id as "overview" | "timeline" | "evidence" | "notes")}
               className={`px-4 py-3 text-sm transition-colors font-medium ${
                 activeTab === tab.id
                   ? "text-[#00D9FF] border-b-2 border-[#00D9FF]"
@@ -1659,10 +1728,10 @@ function InvestigationModal({ alert, onClose }: { alert: Alert; onClose: () => v
                 <div className="p-4 bg-blue-50 rounded-lg border border-blue-200">
                   <h3 className="font-bold text-gray-900 mb-2">Session Information</h3>
                   <div className="grid grid-cols-2 gap-2 text-sm">
-                    <div>Commands: <span className="font-bold">{sessionDetails.commands?.length || 0}</span></div>
-                    <div>Duration: <span className="font-bold">{sessionDetails.behaviorProfile?.sessionDuration || 0}s</span></div>
-                    <div>Skill Level: <span className="font-bold">{sessionDetails.behaviorProfile?.skillLevel || 'Unknown'}</span></div>
-                    <div>Automated: <span className="font-bold">{sessionDetails.behaviorProfile?.automationDetected ? 'Yes' : 'No'}</span></div>
+                    <div>Commands: <span className="font-bold">{(((sessionDetails as Record<string, unknown>).commands as unknown[])?.length || 0)}</span></div>
+                    <div>Duration: <span className="font-bold">{((((sessionDetails as Record<string, unknown>).behaviorProfile as Record<string, unknown>)?.sessionDuration as number) || 0)}s</span></div>
+                    <div>Skill Level: <span className="font-bold">{((((sessionDetails as Record<string, unknown>).behaviorProfile as Record<string, unknown>)?.skillLevel) as string) || 'Unknown'}</span></div>
+                    <div>Automated: <span className="font-bold">{(((sessionDetails as Record<string, unknown>).behaviorProfile as Record<string, unknown>)?.automationDetected ? 'Yes' : 'No')}</span></div>
                   </div>
                 </div>
               )}
@@ -1769,11 +1838,11 @@ function InvestigationModal({ alert, onClose }: { alert: Alert; onClose: () => v
                   <div className="space-y-2 text-sm">
                     <div className="flex justify-between">
                       <span className="text-gray-600">SSH Client:</span>
-                      <span className="text-gray-900">{sessionDetails.fingerprint?.sshClient || 'Unknown'}</span>
+                      <span className="text-gray-900">{((((sessionDetails as Record<string, unknown>).fingerprint as Record<string, unknown>)?.sshClient) as string) || 'Unknown'}</span>
                     </div>
                     <div className="flex justify-between">
                       <span className="text-gray-600">Protocol:</span>
-                      <span className="text-gray-900">{sessionDetails.fingerprint?.protocolVersion || 'SSH-2.0'}</span>
+                      <span className="text-gray-900">{((((sessionDetails as Record<string, unknown>).fingerprint as Record<string, unknown>)?.protocolVersion) as string) || 'SSH-2.0'}</span>
                     </div>
                   </div>
                 </div>

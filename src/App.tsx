@@ -5,21 +5,14 @@ import { Dashboard } from './pages/Dashboard';
 import { LiveSessions } from './pages/LiveSessions';
 import { Login } from './pages/login';  
 import { Register } from './pages/Register';
+import { User } from './types';
 
 // Lazy load heavy pages for better performance
-const Analytics = lazy(() => import('./pages/Analytics').then(m => ({ default: m.Analytics })));
+const Analytics = lazy(() => import('./pages/Analytics'));
 const Alerts = lazy(() => import('./pages/Alerts'))
 const BehavioralAnalytics = lazy(() => import('./pages/BehavioralAnalytics'));
 const DataExport = lazy(() => import('./pages/DataExport'));
 const Settings = lazy(() => import('./pages/Settings'));
-
-// ✅ NEW: Define User type
-interface User {
-  id: string;
-  username: string;
-  email: string;
-  role: 'admin' | 'member';
-}
 
 export default function App() {
   const [currentPage, setCurrentPage] = useState('dashboard');
@@ -38,10 +31,12 @@ export default function App() {
     if (token && userStr) {
       try {
         const user = JSON.parse(userStr);
+        // eslint-disable-next-line
         setCurrentUser(user);
         setIsAuthenticated(true);
-      } catch (error) {
+      } catch (_error) {
         // Invalid stored data, clear it
+        console.error('Failed to parse stored user data:', _error);
         localStorage.removeItem('token');
         localStorage.removeItem('user');
       }

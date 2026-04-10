@@ -14,6 +14,14 @@ export interface Attack {
   commandCount?: number;
 }
 
+// User Types
+export interface User {
+  id: string;
+  username: string;
+  email: string;
+  role: 'admin' | 'member';
+}
+
 // Session Types
 export interface Session {
   id: string;

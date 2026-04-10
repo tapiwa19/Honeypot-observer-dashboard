@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import { io, Socket } from 'socket.io-client';
 import { api } from '../services/api';
 import { Play, Pause, Shield, MapPin, Clock, X, Download, Circle, Activity  } from 'lucide-react';
@@ -27,6 +27,14 @@ interface ThreatIntel {
   commonCommands: { cmd: string; count: number }[];
 }
 
+// Command Record Interface
+interface CommandRecord extends Record<string, unknown> {
+  id: number;
+  command: string;
+  timestamp: string;
+  output?: string;
+}
+
 import { SOCKET_URL as SOCKET_BASE } from '../utils/constants';
 
 // API_BASE no longer needed; axios is configured globally with baseURL and auth
@@ -53,14 +61,14 @@ export function LiveSessions() {
   });
   
   // ✅ NEW: Attack Replay state
-  const [replaySession, setReplaySession] = useState<{ sessionId: string; commands: any[] } | null>(null);
+  const [replaySession, setReplaySession] = useState<{ sessionId: string; commands: CommandRecord[] } | null>(null);
   
   const [expandedSession, setExpandedSession] = useState<string | number | null>(null);
   const [severityFilter, setSeverityFilter] = useState<string>('all');
   const [sortBy, setSortBy] = useState<string>('recent');
   const [selectedSessions, setSelectedSessions] = useState<Set<string | number>>(new Set());
   const [viewDetailsSession, setViewDetailsSession] = useState<string | null>(null);
-  const [sessionCommands, setSessionCommands] = useState<any[]>([]);
+  const [sessionCommands, setSessionCommands] = useState<CommandRecord[]>([]);
   const [searchTerm, setSearchTerm] = useState('');
   const [timeRange, setTimeRange] = useState<'1h' | '24h' | '7d' | 'all'>('1h');
 
@@ -92,35 +100,39 @@ export function LiveSessions() {
 
     // Listen for new sessions
     socketConnection.on('new_session', (newSession: Session) => {
-      console.log('🔴 NEW SESSION DETECTED:', newSession);
-      
-      playNotificationSound();
-      setNewSessionAlert(newSession);
-      setTimeout(() => setNewSessionAlert(null), 10000);
-      
-      setSessions(prevSessions => {
-        const existingIndex = prevSessions.findIndex(s => s.sessionId === newSession.sessionId);
-        
-        if (existingIndex >= 0) {
-          const updated = [...prevSessions];
-          updated[existingIndex] = { ...newSession, isNew: true };
-          return updated;
-        } else {
-          return [{ ...newSession, isNew: true }, ...prevSessions];
-        }
-      });
-      
-      showBrowserNotification(newSession);
-      
-      setTimeout(() => {
-        setSessions(prev => prev.map(s => 
-          s.sessionId === newSession.sessionId ? { ...s, isNew: false } : s
-        ));
-      }, 30000);
-    });
+  // Derive status if not set by server
+  const sessionWithStatus = newSession.status 
+    ? newSession 
+    : { ...newSession, status: 'active' as const };
+
+  playNotificationSound();
+  setNewSessionAlert(sessionWithStatus);
+  setTimeout(() => setNewSessionAlert(null), 10000);
+
+  setSessions(prevSessions => {
+    const existingIndex = prevSessions.findIndex(
+      s => s.sessionId === sessionWithStatus.sessionId
+    );
+    if (existingIndex >= 0) {
+      const updated = [...prevSessions];
+      updated[existingIndex] = { ...sessionWithStatus, isNew: true };
+      return updated;
+    } else {
+      return [{ ...sessionWithStatus, isNew: true }, ...prevSessions];
+    }
+  });
+
+  showBrowserNotification(sessionWithStatus);
+
+  setTimeout(() => {
+    setSessions(prev => prev.map(s =>
+      s.sessionId === sessionWithStatus.sessionId ? { ...s, isNew: false } : s
+    ));
+  }, 30000);
+});
 
     // ✅ NEW: Listen for session updates (when attacker runs more commands)
-    socketConnection.on('session_updated', (updatedSession: any) => {
+    socketConnection.on('session_updated', (updatedSession: Record<string, unknown>) => {
       console.log('🔄 SESSION UPDATED:', updatedSession);
       
       setSessions(prevSessions => 
@@ -171,7 +183,7 @@ export function LiveSessions() {
   // Play notification sound
   const playNotificationSound = () => {
     try {
-      const audioContext = new (window.AudioContext || (window as any).webkitAudioContext)();
+      const audioContext = new (window.AudioContext || (window as unknown as { webkitAudioContext: typeof window.AudioContext }).webkitAudioContext)();
       const oscillator = audioContext.createOscillator();
       const gainNode = audioContext.createGain();
       
@@ -214,36 +226,47 @@ export function LiveSessions() {
     }
   };
 
-  const fetchSessions = async () => {
-    try {
-      setLoading(true);
-      console.log('🔄 Fetching sessions with range:', timeRange);
-      
-      const response = await api.getLiveSessions({ range: timeRange });
-      
-      console.log('✅ Received sessions:', response.data.length);
-      
-      setSessions(response.data);
-      setError(null);
-    } catch (err: any) {
-      console.error('❌ Error fetching sessions:', err);
-      if (err.response?.status === 401) {
-        setError('Unauthorized – please log in again');
-      } else {
-        setError('Failed to load sessions');
-      }
-    } finally {
-      setLoading(false);
+  const fetchSessions = useCallback(async () => {
+  try {
+    setLoading(true);
+    console.log('🔄 Fetching sessions with range:', timeRange);
+
+    const response = await api.getLiveSessions({ range: timeRange });
+
+    console.log('✅ Received sessions:', response.data.length);
+
+    const now = Date.now();
+    const sessionsWithStatus = response.data.map((session: Session) => {
+      if (session.status) return session;
+      const age = (now - new Date(session.timestamp).getTime()) / 1000 / 60;
+      return {
+        ...session,
+        status: age < 5 ? 'active' : age < 30 ? 'recent' : 'closed'
+      } as Session;
+    });
+
+    setSessions(sessionsWithStatus);
+    setError(null);
+  } catch (err: unknown) {
+    const error = err as { response?: { status?: number }; message?: string };
+    console.error('❌ Error fetching sessions:', error);
+    if (error.response?.status === 401) {
+      setError('Unauthorized – please log in again');
+    } else {
+      setError('Failed to load sessions');
     }
-  };
+  } finally {
+    setLoading(false);
+  }
+}, [timeRange]);
 
   const fetchSessionCommands = async (sessionId: string) => {
     try {
       const response = await api.getSessionCommands(sessionId);
-      const transformedCommands = response.data.commands.map((cmd: any, index: number) => ({
+      const transformedCommands: CommandRecord[] = response.data.commands.map((cmd: Record<string, unknown>, index: number) => ({
         id: index + 1,
-        command: cmd.input,
-        timestamp: cmd.timestamp,
+        command: String(cmd.input ?? ''),
+        timestamp: cmd.timestamp as string,
         output: ''
       }));
       setSessionCommands(transformedCommands);
@@ -322,7 +345,7 @@ export function LiveSessions() {
     downloadCSV(csv, `sessions_export_${new Date().toISOString()}.csv`);
   };
 
-  const convertToCSV = (data: any[]) => {
+  const convertToCSV = (data: Session[]) => {
     const headers = ['IP', 'Country', 'Duration', 'Commands', 'Risk', 'Timestamp'];
     const rows = data.map(s => [s.ip, s.country, s.duration, s.commands, s.risk, s.timestamp]);
     return [headers.join(','), ...rows.map(r => r.join(','))].join('\n');
@@ -342,7 +365,7 @@ export function LiveSessions() {
   useEffect(() => {
     fetchSessions(); // Initial fetch only
     // NO POLLING - WebSocket handles real-time updates
-  }, [timeRange]); // Only re-fetch when time range changes
+  }, [fetchSessions]); // Only re-fetch when fetchSessions changes
 
   const handleViewDetails = async (sessionId: string) => {
     setViewDetailsSession(sessionId);
@@ -964,13 +987,14 @@ function SessionCard({ session, expanded, selected, onToggle, onSelect, onViewDe
 }
 
 // Session Details Drawer Component (unchanged)
-function SessionDetailsDrawer({ sessionId, commands, onClose }: { sessionId: string; commands: any[]; onClose: () => void }) {
+function SessionDetailsDrawer({ sessionId, commands, onClose }: { sessionId: string; commands: CommandRecord[]; onClose: () => void }) {
   const [searchTerm, setSearchTerm] = useState('');
   const [copiedIndex, setCopiedIndex] = useState<number | null>(null);
 
-  const filteredCommands = commands.filter(cmd => 
-    cmd.command.toLowerCase().includes(searchTerm.toLowerCase())
-  );
+  const filteredCommands = commands.filter(cmd => {
+  const command = typeof cmd.command === 'string' ? cmd.command : String(cmd.command ?? '');
+  return command.toLowerCase().includes(searchTerm.toLowerCase());
+});
 
   const copyCommand = (command: string, index: number) => {
     navigator.clipboard.writeText(command);
@@ -1089,11 +1113,11 @@ function SessionDetailsDrawer({ sessionId, commands, onClose }: { sessionId: str
 // ✅ NEW: Attack Replay Modal Component
 function AttackReplayModal({ sessionId, commands, onClose, socket }: { 
   sessionId: string; 
-  commands: any[]; 
+  commands: CommandRecord[]; 
   onClose: () => void;
   socket: Socket | null;
 }) {
-  const [liveCommands, setLiveCommands] = useState(commands);
+  const [liveCommands, setLiveCommands] = useState<CommandRecord[]>(commands);
   const [isSessionLive, setIsSessionLive] = useState(false);
   const bottomRef = useRef<HTMLDivElement>(null);
 
@@ -1102,10 +1126,10 @@ function AttackReplayModal({ sessionId, commands, onClose, socket }: {
     const fetchLatest = async () => {
       try {
         const response = await axios.get(`/sessions/${sessionId}/commands`);
-        const latest = response.data.commands.map((cmd: any, i: number) => ({
+        const latest: CommandRecord[] = response.data.commands.map((cmd: Record<string, unknown>, i: number) => ({
           id: i + 1,
-          command: cmd.input,
-          timestamp: cmd.timestamp,
+            command: String(cmd.input ?? ''),
+          timestamp: cmd.timestamp as string,
           output: ''
         }));
         setLiveCommands(latest);
@@ -1120,15 +1144,15 @@ function AttackReplayModal({ sessionId, commands, onClose, socket }: {
   useEffect(() => {
     if (!socket) return;
 
-    socket.on('session_updated', (updatedSession: any) => {
+    socket.on('session_updated', (updatedSession: Record<string, unknown>) => {
       if (updatedSession.sessionId !== sessionId) return;
       
       axios.get(`/sessions/${sessionId}/commands`)
         .then(response => {
-          const latest = response.data.commands.map((cmd: any, i: number) => ({
+          const latest: CommandRecord[] = response.data.commands.map((cmd: Record<string, unknown>, i: number) => ({
             id: i + 1,
-            command: cmd.input,
-            timestamp: cmd.timestamp,
+              command: String(cmd.input ?? ''),
+            timestamp: cmd.timestamp as string,
             output: ''
           }));
           setLiveCommands(latest);
