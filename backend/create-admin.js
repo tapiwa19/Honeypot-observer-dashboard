@@ -1,4 +1,3 @@
-#!/usr/bin/env node
 
 // ============================================
 // CREATE ADMIN USER SCRIPT

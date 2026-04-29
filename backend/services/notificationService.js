@@ -17,7 +17,7 @@ class NotificationService {
       ntfy: {
         enabled: false,
         topic: '',
-        severityThresholds: ['critical']
+        severityThresholds: ['high','critical']
       },
       slack: {
         enabled: false,
@@ -175,7 +175,7 @@ class NotificationService {
               <div><span class="label">Type:</span> ${type || 'Unknown'}</div>
               <div><span class="label">Source IP:</span> ${sourceIp}</div>
               <div><span class="label">Location:</span> ${country || 'Unknown'}</div>
-              <div><span class="label">Timestamp:</span> ${timestamp}</div>
+              <div><span class="label">Timestamp:</span> ${timestamp ? new Date(timestamp).toLocaleString() : new Date().toLocaleString()}</div>
             </div>
             <a href="http://localhost:3001" class="btn">View Dashboard</a>
           </div>
@@ -204,47 +204,57 @@ class NotificationService {
   // NTFY PUSH NOTIFICATIONS
   // ============================================
 
-  async sendNtfy(alert) {
+ async sendNtfy(alert) {
     const { severity, title, sourceIp, country, timestamp, type } = alert;
 
     if (!this.preferences.ntfy.topic) {
-      throw new Error('Ntfy topic not configured');
+        throw new Error('Ntfy topic not configured');
     }
 
     const priorityMap = {
-      critical: 'urgent',
-      high: 'high',
-      medium: 'default',
-      low: 'low'
+        critical: 'urgent',
+        high:     'high',
+        medium:   'default',
+        low:      'low'
     };
 
     const tagMap = {
-      critical: 'rotating_light,skull',
-      high: 'warning',
-      medium: 'bell',
-      low: 'information_source'
+        critical: 'rotating_light,skull',
+        high:     'warning',
+        medium:   'bell',
+        low:      'information_source'
     };
 
+    // ── No emoji in body — causes ByteString error ────────
     const body = [
-      `Severity: ${severity.toUpperCase()}`,
-      `Type: ${type || 'Unknown'}`,
-      `IP: ${sourceIp}`,
-      `Location: ${country || 'Unknown'}`,
-      `Time: ${timestamp}`
+        `Severity: ${severity ? severity.toUpperCase() : 'UNKNOWN'}`,
+        `Type: ${type || 'Unknown'}`,
+        `IP: ${sourceIp || 'Unknown'}`,
+        `Location: ${country || 'Unknown'}`,
+        `Time: ${timestamp ? new Date(timestamp).toLocaleString() : new Date().toLocaleString()}`
     ].join('\n');
 
-    await fetch(`https://ntfy.sh/${this.preferences.ntfy.topic}`, {
-      method: 'POST',
-      body: body,
-      headers: {
-        'Title': title,
-        'Priority': priorityMap[severity] || 'default',
-        'Tags': tagMap[severity] || 'bell'
-      }
-    });
+    // ── Use text/plain to avoid encoding issues ───────────
+    const response = await fetch(
+        `https://ntfy.sh/${this.preferences.ntfy.topic}`,
+        {
+            method: 'POST',
+            body: body,
+            headers: {
+                'Content-Type': 'text/plain; charset=utf-8',
+                'Title':        title ? title.replace(/[^\x00-\x7F]/g, '').trim() : 'Honeypot Alert',
+                'Priority':     priorityMap[severity] || 'default',
+                'Tags':         tagMap[severity]      || 'bell'
+            }
+        }
+    );
+
+    if (!response.ok) {
+        throw new Error(`Ntfy HTTP error: ${response.status}`);
+    }
 
     console.log(`✅ Ntfy notification sent to topic: ${this.preferences.ntfy.topic}`);
-  }
+}
 
   // ============================================
   // SLACK NOTIFICATIONS

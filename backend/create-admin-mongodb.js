@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+
 
 // ============================================
 // CREATE ADMIN USER SCRIPT - MongoDB Version

@@ -27,7 +27,7 @@ const httpServer = createServer(app);
 // NEW CODE - Allows both ports
 const io = new Server(httpServer, {
   cors: {
-    origin: ['http://localhost:3000', 'http://localhost:3001'],
+    origin: ['http://localhost:3000', 'http://localhost:3001','http://localhost:4173'],
     methods: ['GET', 'POST'],
     credentials: true
   }
@@ -37,7 +37,7 @@ const io = new Server(httpServer, {
 app.use(helmet());
 app.use(compression());
 app.use(cors({
-  origin: ['http://localhost:3000', 'http://localhost:3001'],
+  origin: ['http://localhost:3000', 'http://localhost:3001','http://localhost:4173'],
   credentials: true
 }));
 app.use(express.json());
@@ -77,7 +77,7 @@ app.use('/api/notifications', notificationRouter);
 // ✅ NEW: Register alert rules routes
 app.use('/api/alerts', alertRulesRouter);
 
-//FIXED: Only protect sensitive routes that modify data or require admin access
+//Only protect sensitive routes that modify data or require admin access
 // Read-only analytics/data endpoints (dashboard, analytics, sessions, credentials) are PUBLIC
 // IMPORTANT: Define public endpoints BEFORE protected ones so Express matches them first
 app.use('/api/admin', authenticateToken, requireAdmin);
@@ -130,7 +130,7 @@ async function monitorSessions() {
   try {
     // 1. look for recently closed sessions and remove them
     const closedResp = await esClient.search({
-      index: process.env.ELASTICSEARCH_INDEX || '.ds-cowrie-*',
+      index: process.env.ELASTICSEARCH_INDEX || 'cowrie-*',
       size: 1000,
       body: {
         query: {
@@ -155,7 +155,7 @@ async function monitorSessions() {
 
     // 2. also fetch any new connects to keep activeSessions up to date
     const openResp = await esClient.search({
-      index: process.env.ELASTICSEARCH_INDEX || '.ds-cowrie-*',
+      index: process.env.ELASTICSEARCH_INDEX || 'cowrie-*',
       size: 1000,
       body: {
         query: {
@@ -215,7 +215,7 @@ app.get('/api/dashboard/stats', async (req, res) => {
 
     // Count total attacks in last 24h
     const totalResponse = await esClient.count({
-      index: process.env.ELASTICSEARCH_INDEX || '.ds-cowrie-*',
+      index: process.env.ELASTICSEARCH_INDEX || 'cowrie-*',
       body: {
         query: {
           range: {
@@ -227,7 +227,7 @@ app.get('/api/dashboard/stats', async (req, res) => {
 
     // Count attacks in previous 24h window for % change
     const yesterdayResponse = await esClient.count({
-      index: process.env.ELASTICSEARCH_INDEX || '.ds-cowrie-*',
+      index: process.env.ELASTICSEARCH_INDEX || 'cowrie-*',
       body: {
         query: {
           range: {
@@ -242,7 +242,7 @@ app.get('/api/dashboard/stats', async (req, res) => {
 
     // Count unique countries from unique IPs in last 24h
     const countriesResponse = await esClient.search({
-      index: process.env.ELASTICSEARCH_INDEX || '.ds-cowrie-*',
+      index: process.env.ELASTICSEARCH_INDEX || 'cowrie-*',
       size: 0,
       body: {
         query: {
@@ -273,7 +273,7 @@ app.get('/api/dashboard/stats', async (req, res) => {
 
     // Count sessions that CONNECTED in last 1h
 const connectRes = await esClient.search({
-  index: process.env.ELASTICSEARCH_INDEX || '.ds-cowrie-*',
+  index: process.env.ELASTICSEARCH_INDEX || 'cowrie-*',
   size: 0,
   body: {
     query: {
@@ -292,7 +292,7 @@ const connectRes = await esClient.search({
 
 // Count sessions that CLOSED in last 1h
 const closedRes = await esClient.search({
-  index: process.env.ELASTICSEARCH_INDEX || '.ds-cowrie-*',
+  index: process.env.ELASTICSEARCH_INDEX || 'cowrie-*',
   size: 0,
   body: {
     query: {
@@ -371,7 +371,7 @@ app.get('/api/dashboard/attacks', async (req, res) => {
     }
     
     const response = await esClient.search({
-      index: process.env.ELASTICSEARCH_INDEX || '.ds-cowrie-*',
+      index: process.env.ELASTICSEARCH_INDEX || 'cowrie-*',
       body: queryBody
     });
 
@@ -395,10 +395,8 @@ app.get('/api/dashboard/attacks', async (req, res) => {
         flag: geoData.flag,
         type: String(source.eventid || 'connection'),
         severity: severity,
-        details: source.message || (typeof source.input === 'object' ? source.input?.command : source.input) || 'Attack detected',
-         input: typeof source.input === 'string' ? source.input : 
-         typeof source.input === 'object' && source.input?.command ? source.input.command :
-         null
+        details: source.message || source.command_input || 'Attack detected',
+        input: source.command_input || null
       };
     });
 
@@ -464,7 +462,7 @@ app.get('/api/sessions/live', async (req, res) => {
     console.log(`   Fetching events with query:`, JSON.stringify(queryBody, null, 2));
 
     const allEventsResp = await esClient.search({
-      index: process.env.ELASTICSEARCH_INDEX || '.ds-cowrie-*',
+      index: process.env.ELASTICSEARCH_INDEX || 'cowrie-*',
       body: queryBody
     });
 
@@ -516,7 +514,7 @@ app.get('/api/sessions/live', async (req, res) => {
         timestamp: source['@timestamp'],
         eventid: source.eventid,
         src_ip: source.src_ip || source.source_ip,
-        input: source.input,
+        command_input: source.command_input,
         message: source.message
       });
     });
@@ -629,7 +627,7 @@ app.get('/api/sessions/:sessionId/commands', async (req, res) => {
 
     // cap results to avoid huge payloads
     const response = await esClient.search({
-      index: process.env.ELASTICSEARCH_INDEX || '.ds-cowrie-*',
+      index: process.env.ELASTICSEARCH_INDEX || 'cowrie-*',
       size: 1000,
      body: {
   query: {
@@ -665,13 +663,7 @@ app.get('/api/sessions/:sessionId/commands', async (req, res) => {
   } else if (s.eventid === 'cowrie.command.failed') {
     input = `[CMD NOT FOUND] ${s.input || s.message || '?'}`;
   } else {
-  const raw = s.input;
-  if (typeof raw === 'string' && raw.trim() !== '') {
-    input = raw;
-  } else {
-    // s.input is a log object - real command is in message field
-    input = s.message || 'unknown';
-  }
+ input = s.command_input || s.message || 'unknown';
 }
 
   return {
@@ -706,7 +698,7 @@ app.get('/api/sessions/:sessionId/details', async (req, res) => {
     }
 
     const response = await esClient.search({
-      index: process.env.ELASTICSEARCH_INDEX || '.ds-cowrie-*',
+      index: process.env.ELASTICSEARCH_INDEX || 'cowrie-*',
       size: 1000,
       body: {
         query: {
@@ -730,7 +722,7 @@ app.get('/api/sessions/:sessionId/details', async (req, res) => {
       .filter(e => e.eventid === 'cowrie.command.input')
       .map((e, i) => ({
         id: i + 1,
-        command: e.input || 'unknown',
+        command: e.command_input || 'unknown',
         timestamp: e['@timestamp'],
         output: e.output || ''
       }));
@@ -791,7 +783,7 @@ app.get('/api/system/info', async (req, res) => {
     let esStats = { docs: 0 };
     try {
       const stats = await esClient.indices.stats({
-        index: process.env.ELASTICSEARCH_INDEX || '.ds-cowrie-*'
+        index: process.env.ELASTICSEARCH_INDEX || 'cowrie-*'
       });
       esStats.docs = stats._all?.total?.docs?.count || 0;
     } catch (err) {
@@ -801,7 +793,7 @@ app.get('/api/system/info', async (req, res) => {
     let uniqueIPs = 0;
     try {
       const ipAgg = await esClient.search({
-        index: process.env.ELASTICSEARCH_INDEX || '.ds-cowrie-*',
+        index: process.env.ELASTICSEARCH_INDEX || 'cowrie-*',
         size: 0,
         body: {
           query: {
@@ -880,6 +872,46 @@ function formatUptime(seconds) {
   return parts.join(' ') || '< 1m';
 }
 
+function classifyAttackType(events) {
+  const cmdString = events
+    .filter(e => e.eventid === 'cowrie.command.input')
+    .map(e => (e.command_input || e.message || '').toLowerCase())
+    .join(' ');
+
+  const hasFileDownload = events.some(e => e.eventid === 'cowrie.session.file_download');
+  const hasLoginSuccess = events.some(e => e.eventid === 'cowrie.login.success');
+  const hasLoginFailed  = events.some(e => e.eventid === 'cowrie.login.failed');
+  const hasCommands     = events.some(e => e.eventid === 'cowrie.command.input');
+
+  if (hasFileDownload ||
+      cmdString.includes('wget') || cmdString.includes('curl') ||
+      cmdString.includes('chmod') || cmdString.includes('.sh') ||
+      cmdString.includes('xmrig') || cmdString.includes('miner') ||
+      cmdString.includes('crontab') || cmdString.includes('base64')) {
+    return 'Malware Download';
+  }
+
+  if (hasCommands && (
+      cmdString.includes('whoami') || cmdString.includes('uname') ||
+      cmdString.includes('cat /etc') || cmdString.includes('ps aux') ||
+      cmdString.includes('netstat') || cmdString.includes('ifconfig') ||
+      cmdString.includes('hostname') || cmdString.includes(' id') ||
+      cmdString.includes('ls /') || cmdString.includes('/proc') ||
+      cmdString.includes('cat /proc') || cmdString.includes('env'))) {
+    return 'Reconnaissance';
+  }
+
+  if (hasCommands) {
+    return 'Command Injection';
+  }
+
+  if (hasLoginSuccess || hasLoginFailed) {
+    return 'Brute Force';
+  }
+
+  return 'Brute Force';
+}
+
 // Restart Services
 app.post('/api/services/restart', async (req, res) => {
   try {
@@ -918,7 +950,7 @@ app.get('/api/analytics/timeline', async (req, res) => {
     console.log(`\n📊 [TIMELINE] Fetching range: ${range}, interval: ${interval}`);
     
     const response = await esClient.search({
-      index: process.env.ELASTICSEARCH_INDEX || '.ds-cowrie-*',
+      index: process.env.ELASTICSEARCH_INDEX || 'cowrie-*',
       size: 0,
       body: {
         query: {
@@ -1027,7 +1059,7 @@ app.get('/api/analytics/countries', async (req, res) => {
     }
     
     const response = await esClient.search({
-      index: process.env.ELASTICSEARCH_INDEX || '.ds-cowrie-*',
+      index: process.env.ELASTICSEARCH_INDEX || 'cowrie-*',
       size: 0,
       body: queryBody
     });
@@ -1125,7 +1157,7 @@ app.get('/api/credentials/table', async (req, res) => {
     }
     
     const response = await esClient.search({
-      index: process.env.ELASTICSEARCH_INDEX || '.ds-cowrie-*',
+      index: process.env.ELASTICSEARCH_INDEX || 'cowrie-*',
       size: 0,
       body: {
         query: {
@@ -1197,7 +1229,7 @@ app.get('/api/credentials/table', async (req, res) => {
 app.get('/api/analytics/behavioral', async (req, res) => {
   try {
     const response = await esClient.search({
-      index: process.env.ELASTICSEARCH_INDEX || '.ds-cowrie-*',
+      index: process.env.ELASTICSEARCH_INDEX || 'cowrie-*',
       size: 1000,
       body: {
         query: { match_all: {} }
@@ -1375,7 +1407,7 @@ app.get('/api/analytics/stats', async (req, res) => {
     console.log(`📊 [ANALYTICS STATS] Fetching for range: ${range}`);
     
     const totalResponse = await esClient.count({
-      index: process.env.ELASTICSEARCH_INDEX || '.ds-cowrie-*',
+      index: process.env.ELASTICSEARCH_INDEX || 'cowrie-*',
       body: {
         query: {
           range: {
@@ -1388,7 +1420,7 @@ app.get('/api/analytics/stats', async (req, res) => {
     });
 
     const countriesResponse = await esClient.search({
-      index: process.env.ELASTICSEARCH_INDEX || '.ds-cowrie-*',
+      index: process.env.ELASTICSEARCH_INDEX || 'cowrie-*',
       size: 0,
       body: {
         query: {
@@ -1449,7 +1481,7 @@ app.get('/api/analytics/distribution', async (req, res) => {
     }
 
     const response = await esClient.search({
-      index: process.env.ELASTICSEARCH_INDEX || '.ds-cowrie-*',
+      index: process.env.ELASTICSEARCH_INDEX || 'cowrie-*',
       size: 0,
       body: {
         query: {
@@ -1597,7 +1629,7 @@ app.post('/api/settings', async (req, res) => {
 app.delete('/api/data/clear', async (req, res) => {
   try {
     console.log('⚠️  CLEAR ALL DATA requested...');
-    const indexPattern = process.env.ELASTICSEARCH_INDEX || '.ds-cowrie-*';
+    const indexPattern = process.env.ELASTICSEARCH_INDEX || 'cowrie-*';
     await esClient.indices.delete({ index: indexPattern, ignore_unavailable: true });
     console.log(`🗑️  Deleted indices matching ${indexPattern}`);
     res.json({
@@ -1621,7 +1653,7 @@ app.get('/api/debug/events', async (req, res) => {
     console.log('🔍 Checking what events exist in Elasticsearch...');
     
     const eventsResponse = await esClient.search({
-      index: process.env.ELASTICSEARCH_INDEX || '.ds-cowrie-*',
+      index: process.env.ELASTICSEARCH_INDEX || 'cowrie-*',
       size: 0,
       body: {
         aggs: {
@@ -1643,7 +1675,7 @@ app.get('/api/debug/events', async (req, res) => {
     console.log('📊 Event types found:', eventTypes);
 
     const sampleResponse = await esClient.search({
-      index: process.env.ELASTICSEARCH_INDEX || '.ds-cowrie-*',
+      index: process.env.ELASTICSEARCH_INDEX || 'cowrie-*',
       size: 5,
       sort: [{ '@timestamp': { order: 'desc' } }]
     });
@@ -1659,7 +1691,7 @@ app.get('/api/debug/events', async (req, res) => {
     console.log('📄 Sample documents:', samples.length);
 
     const sessionFieldsResponse = await esClient.search({
-      index: process.env.ELASTICSEARCH_INDEX || '.ds-cowrie-*',
+      index: process.env.ELASTICSEARCH_INDEX || 'cowrie-*',
       size: 1,
       body: {
         query: {
@@ -1674,7 +1706,7 @@ app.get('/api/debug/events', async (req, res) => {
     console.log('✅ Has session field:', hasSessionField);
 
     const totalResponse = await esClient.count({
-      index: process.env.ELASTICSEARCH_INDEX || '.ds-cowrie-*'
+      index: process.env.ELASTICSEARCH_INDEX || 'cowrie-*'
     });
 
     const response = {
@@ -1682,7 +1714,7 @@ app.get('/api/debug/events', async (req, res) => {
       eventTypes: eventTypes,
       hasSessionField: hasSessionField,
       sampleDocuments: samples,
-      indexPattern: process.env.ELASTICSEARCH_INDEX || '.ds-cowrie-*',
+      indexPattern: process.env.ELASTICSEARCH_INDEX || 'cowrie-*',
       timestamp: new Date().toISOString()
     };
 
@@ -1703,11 +1735,11 @@ app.get('/api/debug/data', async (req, res) => {
     console.log('\n🔍 CHECKING ELASTICSEARCH DATA...\n');
     
     const total = await esClient.count({
-      index: process.env.ELASTICSEARCH_INDEX || '.ds-cowrie-*'
+      index: process.env.ELASTICSEARCH_INDEX || 'cowrie-*'
     });
     
     const last7d = await esClient.count({
-      index: process.env.ELASTICSEARCH_INDEX || '.ds-cowrie-*',
+      index: process.env.ELASTICSEARCH_INDEX || 'cowrie-*',
       body: {
         query: {
           range: {
@@ -1718,7 +1750,7 @@ app.get('/api/debug/data', async (req, res) => {
     });
     
     const last30d = await esClient.count({
-      index: process.env.ELASTICSEARCH_INDEX || '.ds-cowrie-*',
+      index: process.env.ELASTICSEARCH_INDEX || 'cowrie-*',
       body: {
         query: {
           range: {
@@ -1729,7 +1761,7 @@ app.get('/api/debug/data', async (req, res) => {
     });
     
     const dateRange = await esClient.search({
-      index: process.env.ELASTICSEARCH_INDEX || '.ds-cowrie-*',
+      index: process.env.ELASTICSEARCH_INDEX || 'cowrie-*',
       size: 0,
       body: {
         aggs: {
@@ -1759,7 +1791,7 @@ app.get('/api/debug/data', async (req, res) => {
 app.get('/api/debug/sample', async (req, res) => {
   try {
     const sample = await esClient.search({
-      index: process.env.ELASTICSEARCH_INDEX || '.ds-cowrie-*',
+      index: process.env.ELASTICSEARCH_INDEX || 'cowrie-*',
       size: 1,
       sort: [{ '@timestamp': { order: 'desc' } }]
     });
@@ -1781,7 +1813,7 @@ app.get('/api/debug/sample', async (req, res) => {
 app.get('/api/debug/eventids', async (req, res) => {
   try {
     const sample = await esClient.search({
-      index: process.env.ELASTICSEARCH_INDEX || '.ds-cowrie-*',
+      index: process.env.ELASTICSEARCH_INDEX || 'cowrie-*',
       size: 5,
       sort: [{ '@timestamp': { order: 'desc' } }]
     });
@@ -1801,7 +1833,7 @@ app.get('/api/debug/eventids', async (req, res) => {
 app.get('/api/debug/session-fields', async (req, res) => {
   try {
     const sample = await esClient.search({
-      index: process.env.ELASTICSEARCH_INDEX || '.ds-cowrie-*',
+      index: process.env.ELASTICSEARCH_INDEX || 'cowrie-*',
       size: 1,
       body: {
         query: {
@@ -1832,7 +1864,7 @@ io.on('connection', (socket) => {
   const sendUpdates = async () => {
     try {
       const response = await esClient.search({
-        index: process.env.ELASTICSEARCH_INDEX || '.ds-cowrie-*',
+        index: process.env.ELASTICSEARCH_INDEX || 'cowrie-*',
         size: 1,
         sort: [{ '@timestamp': { order: 'desc' } }]
       });
@@ -1872,23 +1904,34 @@ const knownSessions = new Map();
 const requestCounts = new Map(); // Track requests per IP
 
 // Monitor for DDoS every 60 seconds, evict stale entries
+// Monitor for DDoS every 60 seconds
 setInterval(() => {
   const suspicious = [];
   const now = Date.now();
   
   for (const [ip, data] of requestCounts.entries()) {
-    // remove ips last seen more than a minute ago
     if (now - data.lastSeen > 60000) {
       requestCounts.delete(ip);
       continue;
     }
 
-    if (data.count > 100) { // 100+ requests per minute = suspicious
-      suspicious.push({ 
-        ip, 
-        count: data.count,
-        lastSeen: data.lastSeen 
-      });
+    // ── WHITELIST your own VM and localhost ──────────
+    const isWhitelisted = 
+      ip === '192.168.56.1'  ||
+      ip === '192.168.56.101' ||
+      ip === '127.0.0.1'      ||
+      ip === '::1'            ||
+      ip.startsWith('::ffff:127.') ||
+      ip.startsWith('::ffff:192.168.');
+
+    if (isWhitelisted) {
+      data.count = 0;  // reset count for trusted IPs
+      continue;
+    }
+
+    // Raise threshold — 500 per minute not 100
+    if (data.count > 500) {
+      suspicious.push({ ip, count: data.count, lastSeen: data.lastSeen });
     }
   }
   
@@ -1899,13 +1942,12 @@ setInterval(() => {
     console.log(`⚠️ [DDoS] ${suspicious.length} suspicious IPs detected`);
     
     io.emit('ddos_warning', {
-      suspiciousIPs: suspicious.slice(0, 10), // Top 10 only
+      suspiciousIPs: suspicious.slice(0, 10),
       totalRequests: totalRequests,
       timestamp: new Date().toISOString()
     });
   }
   
-  // reset counts that remain
   for (const data of requestCounts.values()) {
     data.count = 0;
   }
@@ -1919,7 +1961,7 @@ async function broadcastNewSessions() {
     
     const batchSize = 1000;
     const newEvents = await esClient.search({
-      index: process.env.ELASTICSEARCH_INDEX || '.ds-cowrie-*',
+      index: process.env.ELASTICSEARCH_INDEX || 'cowrie-*',
       size: batchSize,
       body: {
         query: {
@@ -1956,7 +1998,7 @@ async function broadcastNewSessions() {
           timestamp: source['@timestamp'],
           eventid: source.eventid,
           src_ip: source.src_ip || source.source_ip,
-          input: source.input,
+          command_input: source.command_input,
           message: source.message
         });
       });
@@ -2004,63 +2046,151 @@ async function broadcastNewSessions() {
           console.log(`📡 [BROADCAST] New session: ${ip} (${geoData.country}) - Risk: ${risk}/10`);
           
           knownSessions.set(sessionId, {
-            commands: commands,
-            status: isClosed ? 'closed' : 'active',
-            isClosed: isClosed
-          });
+    commands: commands,        // first batch
+    totalCommands: commands,   // ← start accumulating
+    risk: risk,
+    status: isClosed ? 'closed' : 'active',
+    isClosed: isClosed
+});
 
           // Send to alert rules engine
-          if (risk >= 7 && alertRulesEngine) {
-            const incomingAlert = {
-              type: 'brute_force',
-              severity: risk >= 9 ? 'critical' : 'high',
-              title: `🚨 ${risk >= 9 ? 'CRITICAL' : 'HIGH RISK'} Attack Detected!`,
-              description: `New SSH attack from ${ip} (${geoData.country}) - Risk: ${risk}/10`,
-              sourceIp: ip,
-              country: geoData.country,
-              sessionId: sessionId,
-              timestamp: firstEvent['@timestamp'],
-              failedAttempts: commands, // Simplified
-              commandCount: commands
-            };
+     if (risk >= 7 && alertRulesEngine) {
+    const incomingAlert = {
+        type: classifyAttackType(events),
+        severity: risk >= 9 ? 'critical' : 'high',
+        title: `CRITICAL Attack: ${classifyAttackType(events)} Detected`,
+        description: `SSH attack from ${ip} (${geoData.country}) — Risk: ${risk}/10, Commands: ${commands}`,
+        sourceIp: ip,
+        country: geoData.country,
+        sessionId: sessionId,
+        timestamp: firstEvent['@timestamp'] || new Date().toISOString(),
+        failedAttempts: commands,
+        commandCount: commands
+    };
 
-            // Process through alert rules engine
-            const ruleResults = await alertRulesEngine.processAlert(incomingAlert);
-            
-            // Send immediate alerts through notification service
-            for (const triggered of ruleResults.triggered) {
-              if (notificationService) {
-                await notificationService.sendAlert({
-                  severity: triggered.alert.severity,
-                  title: triggered.alert.title,
-                  description: triggered.alert.description,
-                  sourceIp: triggered.alert.sourceIp,
-                  country: triggered.alert.country,
-                  timestamp: triggered.alert.timestamp,
-                  type: triggered.alert.type
-                });
-              }
-            }
-          }
-        } else {
-          // ✅ SESSION UPDATE
-          if (previousData.commands !== commands || previousData.status !== sessionData.status) {
-            io.emit('session_updated', sessionData);
-            console.log(`🔄 [UPDATE] ${sessionId}: ${commands} commands`);
-          }
+    const ruleResults = await alertRulesEngine.processAlert(incomingAlert);
+    console.log(`📊 Rules result — Triggered: ${ruleResults.triggered.length}, Throttled: ${ruleResults.throttled.length}`);
 
-          // ✅ SESSION CLOSED
-          if (isClosed && !previousData.isClosed) {
-            io.emit('session_closed', { sessionId: sessionId });
-            console.log(`🔒 [CLOSED] ${sessionId}`);
-          }
-
-          knownSessions.set(sessionId, {
-            commands: commands,
-            status: isClosed ? 'closed' : 'active',
-            isClosed: isClosed
-          });
+    for (const triggered of ruleResults.triggered) {
+        if (notificationService) {
+            console.log(`🔔 Sending notification for rule: ${triggered.ruleId}`);
+            await notificationService.sendAlert({
+                severity:    triggered.alert.severity,
+                title:       triggered.alert.title,
+                description: triggered.alert.description,
+                sourceIp:    triggered.alert.sourceIp,
+                country:     triggered.alert.country,
+                timestamp:   triggered.alert.timestamp,
+                type:        triggered.alert.type
+            });
+            console.log(`✅ Notification sent!`);
         }
+    }
+}
+      } else {
+  // ── Accumulate total commands across all polls ──────
+  const previousTotal = previousData.totalCommands || 0;
+  const totalCommands = previousTotal + commands;
+
+  // ── Recalculate risk from TOTAL commands ────────────
+  let totalRisk = 3;
+  if (totalCommands > 20) totalRisk = 10;
+  else if (totalCommands > 10) totalRisk = 9;
+  else if (totalCommands > 5)  totalRisk = 7;
+  else if (totalCommands > 2)  totalRisk = 5;
+
+  console.log(`🔄 [UPDATE] ${sessionId}: +${commands} new, ${totalCommands} total, risk ${totalRisk}/10`);
+
+  if (previousData.commands !== commands || previousData.status !== sessionData.status) {
+    io.emit('session_updated', { ...sessionData, commands: totalCommands, risk: totalRisk });
+  }
+
+  // ── Fire alert when risk threshold newly crossed ────
+  const previousRisk = previousData.risk || 0;
+  if (totalRisk >= 7 && previousRisk < 7) {
+    console.log(`🚨 [THRESHOLD CROSSED] ${sessionId}: risk ${previousRisk} → ${totalRisk}`);
+    const attackType = classifyAttackType(events); 
+    const incomingAlert = {
+      type:  attackType,
+      severity: totalRisk >= 9 ? 'critical' : 'high',
+      title:  `CRITICAL Attack Detected: ${attackType}`,
+      description: `SSH attack from ${ip} (${geoData.country}) — Risk: ${totalRisk}/10, Total Commands: ${totalCommands}`,
+      sourceIp: ip,
+      country: geoData.country,
+      sessionId: sessionId,
+      timestamp: firstEvent['@timestamp'] || new Date().toISOString(),
+      failedAttempts: totalCommands,
+      commandCount: totalCommands
+    };
+
+    const ruleResults = await alertRulesEngine.processAlert(incomingAlert);
+    console.log(`📊 Rules result — Triggered: ${ruleResults.triggered.length}, Throttled: ${ruleResults.throttled.length}, Dedup: ${ruleResults.deduplicated.length}`);
+
+    for (const triggered of ruleResults.triggered) {
+      if (notificationService) {
+        console.log(`🔔 Sending notification for rule: ${triggered.ruleId}`);
+        await notificationService.sendAlert({
+          severity:    triggered.alert.severity,
+          title:       triggered.alert.title,
+          description: triggered.alert.description,
+          sourceIp:    triggered.alert.sourceIp,
+          country:     triggered.alert.country,
+          timestamp:   triggered.alert.timestamp || new Date().toISOString(),
+          type:        triggered.alert.type
+        });
+        console.log(`✅ Notification sent!`);
+      }
+    }
+  }
+
+  // ── Fire on session close if high risk ──────────────
+  if (isClosed && !previousData.isClosed && totalRisk >= 7) {
+    console.log(`🔒 [CLOSE ALERT] High risk session closed: ${sessionId} Risk: ${totalRisk}/10`);
+
+    const closeAlert = {
+      type: classifyAttackType(events),
+      severity: totalRisk >= 9 ? 'critical' : 'high',
+      title: `Session Closed: ${classifyAttackType(events)} | Risk: ${totalRisk}/10`,
+      description: `${classifyAttackType(events)} attack from ${ip} (${geoData.country}) — Risk: ${totalRisk}/10, Commands: ${totalCommands}`,
+      sourceIp: ip,
+      country: geoData.country,
+      sessionId: sessionId,
+      timestamp: new Date().toISOString(),
+      failedAttempts: totalCommands,
+      commandCount: totalCommands
+    };
+
+    const closeResults = await alertRulesEngine.processAlert(closeAlert);
+    for (const triggered of closeResults.triggered) {
+      if (notificationService) {
+        await notificationService.sendAlert({
+          severity:    triggered.alert.severity,
+          title:       triggered.alert.title,
+          description: triggered.alert.description,
+          sourceIp:    triggered.alert.sourceIp,
+          country:     triggered.alert.country,
+          timestamp:   triggered.alert.timestamp || new Date().toISOString(),
+          type:        triggered.alert.type
+        });
+        console.log(`✅ [CLOSE ALERT] Notification sent`);
+      }
+    }
+  }
+
+  if (isClosed && !previousData.isClosed) {
+    io.emit('session_closed', { sessionId: sessionId });
+    console.log(`🔒 [CLOSED] ${sessionId}`);
+  }
+
+  // ── Store updated totals ─────────────────────────────
+  knownSessions.set(sessionId, {
+    commands: commands,
+    totalCommands: totalCommands,   // ← keep running total
+    risk: totalRisk,
+    status: isClosed ? 'closed' : 'active',
+    isClosed: isClosed
+  });
+}
       }
     }
 
@@ -2084,7 +2214,7 @@ async function broadcastThreatIntel() {
   try {
     // Top attackers
     const topAttackersRes = await esClient.search({
-      index: process.env.ELASTICSEARCH_INDEX || '.ds-cowrie-*',
+      index: process.env.ELASTICSEARCH_INDEX || 'cowrie-*',
       size: 0,
       body: {
         query: { range: { '@timestamp': { gte: 'now-24h' } } },
@@ -2108,7 +2238,7 @@ async function broadcastThreatIntel() {
 
     // Common commands
     const commandsRes = await esClient.search({
-      index: process.env.ELASTICSEARCH_INDEX || '.ds-cowrie-*',
+      index: process.env.ELASTICSEARCH_INDEX || 'cowrie-*',
       size: 0,
       body: {
         query: {
@@ -2121,7 +2251,7 @@ async function broadcastThreatIntel() {
         },
         aggs: {
           common_commands: {
-            terms: { field: 'input.keyword', size: 10 }
+            terms: { field: 'command_input.keyword', size: 10 }
           }
         }
       }
@@ -2151,6 +2281,10 @@ const PORT = process.env.PORT || 5001;
 
 const startServer = async () => {
   try {
+     // ── Initialize notifications FIRST ───────────────
+    alertRulesEngine.setNotificationService(notificationService);
+    console.log('✅ Alert rules engine connected');
+
     await connectDB();
     
     console.log('🔍 Testing Elasticsearch connection...');
@@ -2190,7 +2324,7 @@ const startServer = async () => {
     } else {
       console.log('ℹ️  Email credentials not found in .env');
     }
-    
+
     // Initialize Ntfy
 if (process.env.NTFY_TOPIC) {
   const ntfySuccess = notificationService.initializeNtfy(process.env.NTFY_TOPIC);
@@ -2214,7 +2348,8 @@ if (process.env.NTFY_TOPIC) {
       console.log('ℹ️  Slack webhook not found in .env');
     }
     
-    console.log('');
+    
+   
     // ============================================
     
     console.log('🔄 Starting session monitor...');
