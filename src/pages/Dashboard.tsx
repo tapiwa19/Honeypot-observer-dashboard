@@ -153,7 +153,7 @@ export function Dashboard({ onNavigate }: DashboardProps) {
       // No stat changes needed for updates
     });
  
-    // ✅ FIX 3: session_closed — re-fetch stats instead of blindly decrementing
+    //  session_closed — re-fetch stats instead of blindly decrementing
     // Blindly decrementing caused activeSessions to go negative
     socketConnection.on('session_closed', (data: { sessionId: string }) => {
       console.log('🔒 [Dashboard] Session closed:', data.sessionId);
@@ -161,7 +161,7 @@ export function Dashboard({ onNavigate }: DashboardProps) {
       fetchStats();
     });
  
-    // ✅ FIX 4: threat_intel_update — only update countriesDetected if BIGGER
+    // threat_intel_update — only update countriesDetected if BIGGER
     // Before this fix, topAttackers (max 10 IPs) was overwriting the real count
     socketConnection.on('threat_intel_update', (intel: Record<string, unknown>) => {
       console.log('📊 [Dashboard] Threat intel update received');
@@ -174,7 +174,7 @@ export function Dashboard({ onNavigate }: DashboardProps) {
       if (countries.size > 0) {
         setStats(prev => ({
           ...prev,
-          // ✅ Only update if the new value is larger than what we already have
+          // Only update if the new value is larger than what we already have
           countriesDetected: Math.max(prev.countriesDetected, countries.size)
         }));
       }

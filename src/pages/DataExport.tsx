@@ -107,7 +107,11 @@ export default function DataExport() {
         axios.get(`/sessions/live`, { params: { range } }),
         axios.get(`/analytics/countries`, { params: { range } })
       ]);
+
       
+      console.log('🔑 Credentials raw:', allCredentialsData.data);
+console.log('🌍 Countries raw:', countriesData.data);
+console.log('📅 Range used:', range);
       const totalAttacks = allAttacksData.data?.length || 0;
       const attacksToday = timelineData.data?.reduce((sum: number, d: Record<string, unknown>) => sum + (d.attacks as number || 0), 0) || 0;
       const credentialsCount = allCredentialsData.data?.length || 0;

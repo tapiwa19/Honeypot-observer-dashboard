@@ -1,6 +1,8 @@
 // ============================================
 // HONEYPOT BACKEND SERVER - Node.js + Express + Elasticsearch
 // ============================================
+import correlationEngine from './services/correlationEngine.js';
+import fingerprintService from './services/fingerprintService.js';
 import express from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
@@ -10,8 +12,10 @@ import { Server } from 'socket.io';
 import { Client } from '@elastic/elasticsearch';
 import dotenv from 'dotenv';
 import geoip from 'geoip-lite';
+import rateLimit from 'express-rate-limit';
 import connectDB from './config/database.js';
 import { authRouter, authenticateToken, requireAdmin } from './auth.js';
+import { generateIntelligence, formatIntelligenceAsText } from './intelligenceEngine.js';
 
 //  Import notification routes and service
 import notificationRouter from './routes/notifications.js';
@@ -32,6 +36,24 @@ const io = new Server(httpServer, {
     credentials: true
   }
 });
+// ← ADD RATE LIMITER HERE, before middleware
+const limiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 100,
+  message: { error: 'Too many requests, please try again later.' },
+  standardHeaders: true,
+  legacyHeaders: false,
+  skip: (req) => {
+    // Whitelist your own IPs — never rate limit yourself
+    const ip = req.ip || req.connection.remoteAddress;
+    return (
+      ip === '192.168.56.1'  ||
+      ip === '127.0.0.1'     ||
+      ip === '::1'           ||
+      ip.startsWith('::ffff:192.168.')
+    );
+  }
+});
 
 // Middleware
 app.use(helmet());
@@ -41,6 +63,7 @@ app.use(cors({
   credentials: true
 }));
 app.use(express.json());
+app.use('/api/', limiter); 
 
 // helper utilities
 function extractAggs(response) {
@@ -98,6 +121,13 @@ function getCountryFromIP(ip) {
   
   if (!geo || ip.startsWith('192.168') || ip.startsWith('10.') || ip.startsWith('172.')) {
     const lastOctet = parseInt(ip.split('.').pop() || '0');
+    
+const knownIPs = {
+  '192.168.56.1': { country: 'Zimbabwe', code: 'ZW', flag: '🇿🇼' },
+  '192.168.56.101': { country: 'Zimbabwe', code: 'ZW', flag: '🇿🇼' },
+};
+
+if (knownIPs[ip]) return knownIPs[ip];
     const demoCountries = [
       { country: 'China', code: 'CN', flag: '🇨🇳' },
       { country: 'Russia', code: 'RU', flag: '🇷🇺' },
@@ -137,7 +167,7 @@ async function monitorSessions() {
           bool: {
             must: [
               { term: { 'eventid': 'cowrie.session.closed' } },
-              { range: { '@timestamp': { gte: 'now-10m' } } }
+              { range: { '@timestamp': { gte: 'now-2m' } } }
             ]
           }
         }
@@ -442,7 +472,7 @@ app.get('/api/sessions/live', async (req, res) => {
 
     console.log(`   Time filter: ${esRange || 'none'}`);
 
-    // ✅ STRATEGY: pull a recent slice of events and then group them in JS
+    // STRATEGY: pull a recent slice of events and then group them in JS
     
     const queryBody = esRange
       ? {
@@ -452,7 +482,7 @@ app.get('/api/sessions/live', async (req, res) => {
             }
           },
           sort: [{ '@timestamp': { order: 'desc' } }],
-          size: 10000 // grab most recent 10k events; warn if this is reached
+          size: 1000 // grab most recent 10k events; warn if this is reached
         }
       : {
           sort: [{ '@timestamp': { order: 'desc' } }],
@@ -521,7 +551,7 @@ app.get('/api/sessions/live', async (req, res) => {
 
     console.log(`   ✅ Found ${sessionEventsMap.size} unique sessions`);
 
-    // ✅ Build session objects using the accumulated metadata
+    //  Build session objects using the accumulated metadata
     const sessionsMap = new Map();
     const now = Date.now();
 
@@ -529,7 +559,7 @@ app.get('/api/sessions/live', async (req, res) => {
       const startTime = sess.startTime;
       const startTimeMs = startTime.getTime();
 
-      // ✅ Apply client-side time filter based on session START time
+      //  Apply client-side time filter based on session START time
       if (jsTimeFilter && startTimeMs < jsTimeFilter) {
         continue; // Skip sessions that started before our time range
       }
@@ -547,7 +577,7 @@ app.get('/api/sessions/live', async (req, res) => {
       } else {
         duration = Math.floor((now - startTimeMs) / 1000);
       }
-
+       duration = Math.max(0, duration);
       const commands = sess.commands;
 
       // Calculate risk
@@ -875,7 +905,7 @@ function formatUptime(seconds) {
 function classifyAttackType(events) {
   const cmdString = events
     .filter(e => e.eventid === 'cowrie.command.input')
-    .map(e => (e.command_input || e.message || '').toLowerCase())
+    .map(e => String(e.command_input || e.message || '').toLowerCase())
     .join(' ');
 
   const hasFileDownload = events.some(e => e.eventid === 'cowrie.session.file_download');
@@ -890,6 +920,37 @@ function classifyAttackType(events) {
       cmdString.includes('crontab') || cmdString.includes('base64')) {
     return 'Malware Download';
   }
+  // Privilege Escalation
+if (hasCommands && (
+    cmdString.includes('sudo') || cmdString.includes('su ') ||
+    cmdString.includes('chmod 777') || cmdString.includes('chown') ||
+    cmdString.includes('/etc/sudoers') || cmdString.includes('passwd'))) {
+  return 'Privilege Escalation';
+}
+
+// Lateral Movement
+if (hasCommands && (
+    cmdString.includes('ssh ') || cmdString.includes('scp ') ||
+    cmdString.includes('rsync') || cmdString.includes('nc ') ||
+    cmdString.includes('nmap') || cmdString.includes('ping'))) {
+  return 'Lateral Movement';
+}
+
+// Data Exfiltration  
+if (hasCommands && (
+    cmdString.includes('tar ') || cmdString.includes('zip ') ||
+    cmdString.includes('ftp') || cmdString.includes('scp') ||
+    cmdString.includes('rsync') || cmdString.includes('curl -T'))) {
+  return 'Data Exfiltration';
+}
+
+// Cryptomining
+if (hasCommands && (
+    cmdString.includes('xmrig') || cmdString.includes('minerd') ||
+    cmdString.includes('cryptonight') || cmdString.includes('monero') ||
+    cmdString.includes('stratum+tcp'))) {
+  return 'Cryptomining';
+}
 
   if (hasCommands && (
       cmdString.includes('whoami') || cmdString.includes('uname') ||
@@ -1050,7 +1111,7 @@ app.get('/api/analytics/countries', async (req, res) => {
         aggs: {
           unique_ips: {
             terms: {
-              field: 'src_ip.keyword',  // ✅ This field EXISTS
+              field: 'src_ip',  // ✅ This field EXISTS
               size: 1000
             }
           }
@@ -1170,12 +1231,12 @@ app.get('/api/credentials/table', async (req, res) => {
             composite: {
               size: 1000,
               sources: [
-                { username: { terms: { field: 'username.keyword' } } },
-                { password: { terms: { field: 'password.keyword' } } }
+                { username: { terms: { field: 'username' } } },
+                { password: { terms: { field: 'password' } } }
               ]
             },
             aggs: {
-              attempts: { value_count: { field: 'username.keyword' } },
+              attempts: { value_count: { field: 'username' } },
               success: {
                 filter: { term: { 'eventid': 'cowrie.login.success' } }
               },
@@ -1559,36 +1620,52 @@ app.get('/api/analytics/distribution', async (req, res) => {
   }
 });
 
-// AI calling endpoint
 app.post('/api/ai/analyze', async (req, res) => {
   try {
-    const { prompt } = req.body;
-    console.log('📨 Prompt received:', prompt?.slice(0, 100));
-    
-    const response = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-api-key': process.env.ANTHROPIC_API_KEY,
-        'anthropic-version': '2023-06-01'
-      },
-      body: JSON.stringify({
-        model: 'claude-opus-4-6',
-        max_tokens: 1000,
-        messages: [{ role: 'user', content: prompt }]
-      })
-    });
+    const { prompt, alertData } = req.body;
 
-    const data = await response.json();
-    console.log('🤖 Full Anthropic response:', JSON.stringify(data, null, 2));
-    
-    const text = data.content?.[0]?.text || 'No response generated';
-    res.json({ text });
+    console.log('🧠 [AI] Request received:', { hasAlertData: !!alertData, hasPrompt: !!prompt });
+
+    // ── Priority 1: alertData object → use smart engine ──
+    if (alertData) {
+      const intel = generateIntelligence(alertData);
+      const text = formatIntelligenceAsText(intel);
+      console.log('🧠 [AI] Generated text length:', text.length);
+      return res.json({ text, intel });
+    }
+
+    // ── Priority 2: prompt string → parse and use engine ──
+    if (prompt) {
+      console.log('🧠 [AI] Using intelligence engine with prompt parsing');
+      const ipMatch = prompt.match(/\b(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})\b/);
+      const severityMatch = prompt.match(/severity[:\s]+(\w+)/i);
+      const typeMatch = prompt.match(/event type[:\s]+(\S+)/i);
+      const cmdMatches = prompt.match(/\$\s+(.+)/g) || [];
+      const commands = cmdMatches.map(c => c.replace(/^\$\s+/, ''));
+
+      const intel = generateIntelligence({
+        type: typeMatch?.[1] || 'unknown',
+        severity: severityMatch?.[1] || 'medium',
+        sourceIp: ipMatch?.[1] || 'unknown',
+        country: 'Unknown',
+        commands,
+        commandCount: commands.length,
+        risk: 0,
+      });
+
+      const text = formatIntelligenceAsText(intel);
+      console.log('🧠 [AI] Prompt-parsed text length:', text.length);
+      return res.json({ text });
+    }
+
+    return res.json({ text: 'No alert data provided' });
+
   } catch (error) {
-    console.error('AI analysis error:', error);
+    console.error('❌ Intelligence error:', error);
     res.status(500).json({ error: error.message });
   }
 });
+
 
 // Settings
 app.get('/api/settings', async (req, res) => {
@@ -1898,12 +1975,13 @@ io.on('connection', (socket) => {
 // REAL-TIME SESSION MONITORING
 // ============================================
 
-let lastCheckedTimestamp = new Date(Date.now() - 24 * 60 * 60 * 1000);
+let lastCheckedTimestamp = new Date(Date.now() - 90 * 1000);
+const seenEventIds = new Set();
 const knownSessions = new Map();
-
+const alertedSessions = new Set();
 const requestCounts = new Map(); // Track requests per IP
 
-// Monitor for DDoS every 60 seconds, evict stale entries
+
 // Monitor for DDoS every 60 seconds
 setInterval(() => {
   const suspicious = [];
@@ -1958,8 +2036,9 @@ setInterval(() => {
 async function broadcastNewSessions() {
   try {
     const now = new Date();
-    
-    const batchSize = 1000;
+    const lagBuffer = new Date(lastCheckedTimestamp.getTime() - 30000);
+
+    const batchSize = 100;
     const newEvents = await esClient.search({
       index: process.env.ELASTICSEARCH_INDEX || 'cowrie-*',
       size: batchSize,
@@ -1967,7 +2046,7 @@ async function broadcastNewSessions() {
         query: {
           range: {
             '@timestamp': {
-              gte: lastCheckedTimestamp.toISOString(),
+              gte: lagBuffer.toISOString(),
               lte: now.toISOString()
             }
           }
@@ -1976,240 +2055,226 @@ async function broadcastNewSessions() {
       }
     });
 
-    if (newEvents.hits.hits.length > 0) {
-      console.log(`🔴 [LIVE] Found ${newEvents.hits.hits.length} new events`);
-      if (newEvents.hits.hits.length === batchSize) {
-        console.warn('⚠️ broadcastNewSessions result capped at', batchSize);
-      }
-      
+    // ── Deduplicate using ES document IDs ──────────
+    const freshHits = newEvents.hits.hits.filter(hit => {
+      if (seenEventIds.has(hit._id)) return false;
+      seenEventIds.add(hit._id);
+      return true;
+    });
+
+    if (seenEventIds.size > 20000) seenEventIds.clear();
+
+    if (freshHits.length > 0) {
+      console.log(`🔴 [LIVE] Found ${freshHits.length} new events`);
+
       const sessionEventsMap = new Map();
-      
-      newEvents.hits.hits.forEach(hit => {
+
+      freshHits.forEach(hit => {
         const source = hit._source;
         const sessionId = source.session;
-        
         if (!sessionId) return;
-        
+
         if (!sessionEventsMap.has(sessionId)) {
           sessionEventsMap.set(sessionId, []);
         }
-        
         sessionEventsMap.get(sessionId).push({
           timestamp: source['@timestamp'],
           eventid: source.eventid,
           src_ip: source.src_ip || source.source_ip,
-          command_input: source.command_input,
+          command_input: source.command_input || source.input,
           message: source.message
         });
       });
 
       for (const [sessionId, events] of sessionEventsMap.entries()) {
         events.sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
-        
+
         const firstEvent = events[0];
         const ip = firstEvent.src_ip || 'unknown';
         const geoData = getCountryFromIP(ip);
-        
-        const commands = events.filter(e => e.eventid === 'cowrie.command.input').length;
-        const isClosed = events.some(e => e.eventid === 'cowrie.session.closed');
-        
-        let risk = 3;
-        if (commands > 20) risk = 10;
-        else if (commands > 10) risk = 9;
-        else if (commands > 5) risk = 7;
-        else if (commands > 2) risk = 5;
 
-        // ✅ SANITIZED session data
-        const sessionData = {
-          id: String(sessionId).slice(0, 100),
-          sessionId: String(sessionId).slice(0, 100),
-          ip: String(ip).replace(/[<>'"]/g, '').slice(0, 45),
-          country: String(geoData.flag).slice(0, 10),
-          countryName: String(geoData.country).replace(/[<>'"]/g, '').slice(0, 100),
-          duration: 0,
-          commands: Math.max(0, Math.min(10000, commands)),
-          risk: Math.max(0, Math.min(10, risk)),
-          timestamp: firstEvent['@timestamp'],
-          timeAgo: 'just now',
-          status: isClosed ? 'closed' : 'active',
-          isClosed: !!isClosed,
-          isNew: true
+        const commands = events.filter(e =>
+          e.eventid === 'cowrie.command.input'
+        ).length;
+
+        const isClosed = events.some(e =>
+          e.eventid === 'cowrie.session.closed'
+        );
+
+        const wasKnown = knownSessions.has(sessionId);
+        const previousData = knownSessions.get(sessionId) || {
+          totalCommands: 0, risk: 0, isClosed: false
         };
 
-        // ✅ CHECK IF NEW OR UPDATE
-        const wasKnown = knownSessions.has(sessionId);
-        const previousData = knownSessions.get(sessionId);
+        const totalCommands = previousData.totalCommands + commands;
+
+        let risk = 3;
+        if (totalCommands > 20) risk = 10;
+        else if (totalCommands > 10) risk = 9;
+        else if (totalCommands > 5) risk = 7;
+        else if (totalCommands > 2) risk = 5;
+
+        // Calculate real duration
+
+const connectEvent = events.find(e => e.eventid === 'cowrie.session.connect');
+const startEvent = connectEvent || firstEvent;
+const sessionStartTime = new Date(startEvent.timestamp).getTime();
+const sessionDuration = Math.max(0, Math.floor((Date.now() - sessionStartTime) / 1000));
+
+const sessionData = {
+  id: String(sessionId).slice(0, 100),
+  sessionId: String(sessionId).slice(0, 100),
+  ip: String(ip).replace(/[<>'"]/g, '').slice(0, 45),
+  country: String(geoData.flag).slice(0, 10),
+  countryName: String(geoData.country).slice(0, 100),
+  duration: sessionDuration, // ← real duration now
+  commands: Math.max(0, totalCommands),
+  risk: Math.max(0, Math.min(10, risk)),
+  timestamp: firstEvent.timestamp,
+  timeAgo: 'just now',
+  status: isClosed ? 'closed' : 'active',
+  isClosed: !!isClosed,
+  isNew: !wasKnown
+};
 
         if (!wasKnown) {
-          // ✅ NEW SESSION
           io.emit('new_session', sessionData);
           console.log(`📡 [BROADCAST] New session: ${ip} (${geoData.country}) - Risk: ${risk}/10`);
-          
-          knownSessions.set(sessionId, {
-    commands: commands,        // first batch
-    totalCommands: commands,   // ← start accumulating
-    risk: risk,
-    status: isClosed ? 'closed' : 'active',
-    isClosed: isClosed
-});
-
-          // Send to alert rules engine
-     if (risk >= 7 && alertRulesEngine) {
-    const incomingAlert = {
-        type: classifyAttackType(events),
-        severity: risk >= 9 ? 'critical' : 'high',
-        title: `CRITICAL Attack: ${classifyAttackType(events)} Detected`,
-        description: `SSH attack from ${ip} (${geoData.country}) — Risk: ${risk}/10, Commands: ${commands}`,
-        sourceIp: ip,
-        country: geoData.country,
-        sessionId: sessionId,
-        timestamp: firstEvent['@timestamp'] || new Date().toISOString(),
-        failedAttempts: commands,
-        commandCount: commands
-    };
-
-    const ruleResults = await alertRulesEngine.processAlert(incomingAlert);
-    console.log(`📊 Rules result — Triggered: ${ruleResults.triggered.length}, Throttled: ${ruleResults.throttled.length}`);
-
-    for (const triggered of ruleResults.triggered) {
-        if (notificationService) {
-            console.log(`🔔 Sending notification for rule: ${triggered.ruleId}`);
-            await notificationService.sendAlert({
-                severity:    triggered.alert.severity,
-                title:       triggered.alert.title,
-                description: triggered.alert.description,
-                sourceIp:    triggered.alert.sourceIp,
-                country:     triggered.alert.country,
-                timestamp:   triggered.alert.timestamp,
-                type:        triggered.alert.type
-            });
-            console.log(`✅ Notification sent!`);
+        } else {
+          if (previousData.totalCommands !== totalCommands ||
+              previousData.isClosed !== isClosed) {
+            io.emit('session_updated', sessionData);
+            console.log(`🔄 [UPDATE] ${sessionId}: +${commands} new, ${totalCommands} total, risk ${risk}/10`);
+          }
         }
-    }
+        // ── Fingerprint the attacker ──────────────
+const fingerprint = fingerprintService.fingerprintFromEvents(events);
+if (fingerprint) {
+  const botnetCheck = fingerprintService.trackFingerprint(
+    fingerprint.hassh, 
+    { ip, sessionId }
+  );
+
+  // Log fingerprint summary
+  console.log(`🔍 [Fingerprint] Session ${sessionId}:`);
+  console.log(fingerprintService.getSummary(fingerprint));
+
+  // If botnet detected — escalate alert
+  if (botnetCheck?.isBotnet) {
+    console.log(`🤖 [BOTNET] Same tool attacking from ${botnetCheck.uniqueIPs} IPs!`);
+  }
+
+  // Add fingerprint to session data for frontend
+  sessionData.fingerprint = {
+    tool:        fingerprint.toolInfo.tool,
+    threat:      fingerprint.toolInfo.threat,
+    isAutomated: fingerprint.isAutomated.isAutomated,
+    skillLevel:  fingerprint.skillLevel,
+    hassh:       fingerprint.hassh
+  };
 }
-      } else {
-  // ── Accumulate total commands across all polls ──────
-  const previousTotal = previousData.totalCommands || 0;
-  const totalCommands = previousTotal + commands;
 
-  // ── Recalculate risk from TOTAL commands ────────────
-  let totalRisk = 3;
-  if (totalCommands > 20) totalRisk = 10;
-  else if (totalCommands > 10) totalRisk = 9;
-  else if (totalCommands > 5)  totalRisk = 7;
-  else if (totalCommands > 2)  totalRisk = 5;
+        // ── Fire alert when threshold crossed ────────
+      const previousRisk = previousData.risk || 0;
+const alertKey9 = `${sessionId}-9`;
+const alertKey7 = `${sessionId}-7`;
 
-  console.log(`🔄 [UPDATE] ${sessionId}: +${commands} new, ${totalCommands} total, risk ${totalRisk}/10`);
+if (risk >= 9 && previousRisk < 9 && !alertedSessions.has(alertKey9) && alertRulesEngine) {
+  alertedSessions.add(alertKey9);
+  const attackType = classifyAttackType(events);
 
-  if (previousData.commands !== commands || previousData.status !== sessionData.status) {
-    io.emit('session_updated', { ...sessionData, commands: totalCommands, risk: totalRisk });
-  }
-
-  // ── Fire alert when risk threshold newly crossed ────
-  const previousRisk = previousData.risk || 0;
-  if (totalRisk >= 7 && previousRisk < 7) {
-    console.log(`🚨 [THRESHOLD CROSSED] ${sessionId}: risk ${previousRisk} → ${totalRisk}`);
-    const attackType = classifyAttackType(events); 
-    const incomingAlert = {
-      type:  attackType,
-      severity: totalRisk >= 9 ? 'critical' : 'high',
-      title:  `CRITICAL Attack Detected: ${attackType}`,
-      description: `SSH attack from ${ip} (${geoData.country}) — Risk: ${totalRisk}/10, Total Commands: ${totalCommands}`,
-      sourceIp: ip,
-      country: geoData.country,
-      sessionId: sessionId,
-      timestamp: firstEvent['@timestamp'] || new Date().toISOString(),
-      failedAttempts: totalCommands,
-      commandCount: totalCommands
-    };
-
-    const ruleResults = await alertRulesEngine.processAlert(incomingAlert);
-    console.log(`📊 Rules result — Triggered: ${ruleResults.triggered.length}, Throttled: ${ruleResults.throttled.length}, Dedup: ${ruleResults.deduplicated.length}`);
-
-    for (const triggered of ruleResults.triggered) {
-      if (notificationService) {
-        console.log(`🔔 Sending notification for rule: ${triggered.ruleId}`);
-        await notificationService.sendAlert({
-          severity:    triggered.alert.severity,
-          title:       triggered.alert.title,
-          description: triggered.alert.description,
-          sourceIp:    triggered.alert.sourceIp,
-          country:     triggered.alert.country,
-          timestamp:   triggered.alert.timestamp || new Date().toISOString(),
-          type:        triggered.alert.type
-        });
-        console.log(`✅ Notification sent!`);
-      }
-    }
-  }
-
-  // ── Fire on session close if high risk ──────────────
-  if (isClosed && !previousData.isClosed && totalRisk >= 7) {
-    console.log(`🔒 [CLOSE ALERT] High risk session closed: ${sessionId} Risk: ${totalRisk}/10`);
-
-    const closeAlert = {
-      type: classifyAttackType(events),
-      severity: totalRisk >= 9 ? 'critical' : 'high',
-      title: `Session Closed: ${classifyAttackType(events)} | Risk: ${totalRisk}/10`,
-      description: `${classifyAttackType(events)} attack from ${ip} (${geoData.country}) — Risk: ${totalRisk}/10, Commands: ${totalCommands}`,
-      sourceIp: ip,
-      country: geoData.country,
-      sessionId: sessionId,
-      timestamp: new Date().toISOString(),
-      failedAttempts: totalCommands,
-      commandCount: totalCommands
-    };
-
-    const closeResults = await alertRulesEngine.processAlert(closeAlert);
-    for (const triggered of closeResults.triggered) {
-      if (notificationService) {
-        await notificationService.sendAlert({
-          severity:    triggered.alert.severity,
-          title:       triggered.alert.title,
-          description: triggered.alert.description,
-          sourceIp:    triggered.alert.sourceIp,
-          country:     triggered.alert.country,
-          timestamp:   triggered.alert.timestamp || new Date().toISOString(),
-          type:        triggered.alert.type
-        });
-        console.log(`✅ [CLOSE ALERT] Notification sent`);
-      }
-    }
-  }
-
-  if (isClosed && !previousData.isClosed) {
-    io.emit('session_closed', { sessionId: sessionId });
-    console.log(`🔒 [CLOSED] ${sessionId}`);
-  }
-
-  // ── Store updated totals ─────────────────────────────
-  knownSessions.set(sessionId, {
-    commands: commands,
-    totalCommands: totalCommands,   // ← keep running total
-    risk: totalRisk,
-    status: isClosed ? 'closed' : 'active',
-    isClosed: isClosed
+  // ── Run through correlation engine first ──
+  const correlation = correlationEngine.evaluate({
+    sourceIp: ip,
+    sessionId,
+    type: attackType,
+    risk,
+    commandCount: totalCommands,
+    country: geoData.country
   });
+
+  if (correlation.shouldAlert) {
+    console.log(`🚨 [CRITICAL] ${sessionId}: risk ${previousRisk} → ${risk} | Score: ${correlation.score}`);
+
+    const incomingAlert = {
+      type: attackType,
+      severity: correlation.severity,
+      title: `🔴 CRITICAL: ${attackType} Detected`,
+      description: `SSH attack from ${ip} (${geoData.country}) — Risk: ${risk}/10, Commands: ${totalCommands}${correlation.correlation.triggered.length > 0 ? ` | ${correlation.correlation.triggered[0].description}` : ''}`,
+      sourceIp: ip,
+      country: geoData.country,
+      sessionId,
+      timestamp: firstEvent.timestamp || new Date().toISOString(),
+      commandCount: totalCommands
+    };
+
+    await alertRulesEngine.processAlert(incomingAlert);
+  } else {
+    console.log(`🔕 [Suppressed] ${sessionId} — ${correlation.suppressedReason}`);
+  }
+
+} else if (risk >= 7 && previousRisk < 7 && !alertedSessions.has(alertKey7) && alertRulesEngine) {
+  alertedSessions.add(alertKey7);
+  const attackType = classifyAttackType(events);
+
+  const correlation = correlationEngine.evaluate({
+    sourceIp: ip,
+    sessionId,
+    type: attackType,
+    risk,
+    commandCount: totalCommands,
+    country: geoData.country
+  });
+
+  if (correlation.shouldAlert) {
+    console.log(`⚠️ [HIGH] ${sessionId}: risk ${previousRisk} → ${risk} | Score: ${correlation.score}`);
+
+    let alertSeverity = correlation.severity;
+
+    const incomingAlert = {
+      type: attackType,
+      severity: alertSeverity,
+      title: `${alertSeverity === 'critical' ? '🔴' : alertSeverity === 'high' ? '🟠' : '🟡'} ${attackType} Detected`,
+      description: `SSH attack from ${ip} (${geoData.country}) — Risk: ${risk}/10, Commands: ${totalCommands}`,
+      sourceIp: ip,
+      country: geoData.country,
+      sessionId,
+      timestamp: firstEvent.timestamp || new Date().toISOString(),
+      commandCount: totalCommands
+    };
+
+   await alertRulesEngine.processAlert(incomingAlert);
+  } else {
+    console.log(`🔕 [Suppressed] ${sessionId} — ${correlation.suppressedReason}`);
+  }
 }
+        if (isClosed && !previousData.isClosed) {
+          io.emit('session_closed', { sessionId });
+          console.log(`🔒 [CLOSED] ${sessionId}`);
+          alertedSessions.delete(`${sessionId}-7`);
+         alertedSessions.delete(`${sessionId}-9`)
+        }
+
+        knownSessions.set(sessionId, {
+          commands,
+          totalCommands,
+          risk,
+          status: isClosed ? 'closed' : 'active',
+          isClosed,
+          startTime: previousData.startTime || new Date(startEvent.timestamp).getTime()
+          
+        });
       }
     }
 
-    // advance pointer intelligently – if we hit the batch cap move to the
-    // timestamp of the last event we actually processed rather than jumping
-    // all the way to now, otherwise we could skip unreturned events.
-    if (newEvents && newEvents.hits && newEvents.hits.hits.length === batchSize) {
-      const lastTsStr = newEvents.hits.hits[newEvents.hits.hits.length - 1]._source['@timestamp'];
-      lastCheckedTimestamp = new Date(lastTsStr);
-    } else {
-      lastCheckedTimestamp = now;
-    }
+    lastCheckedTimestamp = now;
 
   } catch (error) {
-    console.error('❌ [LIVE] Error broadcasting sessions:', error.message);
+    console.error('❌ [LIVE] Error:', error.message);
   }
 }
 
-
+   
 async function broadcastThreatIntel() {
   try {
     // Top attackers
@@ -2220,7 +2285,7 @@ async function broadcastThreatIntel() {
         query: { range: { '@timestamp': { gte: 'now-24h' } } },
         aggs: {
           top_ips: {
-            terms: { field: 'src_ip.keyword', size: 10 }
+            terms: { field: 'src_ip', size: 10 }
           }
         }
       }
@@ -2279,23 +2344,44 @@ async function broadcastThreatIntel() {
 // Start server
 const PORT = process.env.PORT || 5001;
 
+httpServer.on('error', (err) => {
+  if (err.code === 'EADDRINUSE') {
+    console.error(`❌ Port ${PORT} already in use. Run: taskkill /IM node.exe /F`);
+    process.exit(1);
+  }
+});
+
 const startServer = async () => {
   try {
      // ── Initialize notifications FIRST ───────────────
     alertRulesEngine.setNotificationService(notificationService);
     console.log('✅ Alert rules engine connected');
 
-    await connectDB();
     
     console.log('🔍 Testing Elasticsearch connection...');
     const health = await esClient.cluster.health();
     console.log(`✅ Elasticsearch connected: ${health.cluster_name}`);
     console.log('🔄 Starting session monitor...');
+
     // run monitor once at startup and then schedule it to run every minute
+
     await monitorSessions();
     setInterval(monitorSessions, 60000);
-    console.log('🔴 Starting real-time attack monitoring...');
-    setInterval(broadcastNewSessions, 2000);
+
+    setInterval(() => {
+  const now = Date.now();
+  const tenMinutes = 10 * 60 * 1000;
+  for (const [sessionId, data] of activeSessions.entries()) {
+    const sessionTime = new Date(sessionStartTimes.get(sessionId) || 0).getTime();
+    if (now - sessionTime > tenMinutes) {
+      activeSessions.delete(sessionId);
+      sessionStartTimes.delete(sessionId);
+    }
+  }
+  console.log(`🧹 [Cleanup] Active sessions: ${activeSessions.size}`);
+}, 600000);
+
+    setInterval(broadcastNewSessions, 5000);
    setInterval(broadcastThreatIntel, 30000); // Every 30 seconds
    broadcastThreatIntel(); // ✅ Run once immediately on startup
    console.log('📊 Threat intel monitoring started (30s interval)');
@@ -2350,10 +2436,7 @@ if (process.env.NTFY_TOPIC) {
     
     
    
-    // ============================================
     
-    console.log('🔄 Starting session monitor...');
-    monitorSessions();
   } catch (error) {
     console.error('❌ Elasticsearch connection failed:', error.message);
     console.error('⚠️  Server will continue but ES features will be unavailable');
@@ -2388,6 +2471,7 @@ if (process.env.NTFY_TOPIC) {
     console.log(`\n✅ Server ready for connections!\n`);
   });
 };
+
 
 startServer();
  

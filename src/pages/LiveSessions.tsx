@@ -778,7 +778,7 @@ interface SessionCardProps {
   onStartReplay: () => void; // NEW
 }
 
-function SessionCard({ session, expanded, selected, onToggle, onSelect, onViewDetails, onStartReplay }: SessionCardProps) {
+function SessionCard({ session, selected, onSelect, onViewDetails, onStartReplay }: SessionCardProps) {
   const formatDuration = (seconds: number) => {
     const m = Math.floor(seconds / 60);
     const s = seconds % 60;
@@ -894,13 +894,7 @@ function SessionCard({ session, expanded, selected, onToggle, onSelect, onViewDe
         </div>
 
         <div className="space-y-2">
-          <button
-            onClick={onToggle}
-            className="w-full px-4 py-2 bg-gradient-to-r from-[#00D9FF] to-[#8B5CF6] text-white font-medium rounded-lg hover:shadow-lg hover:shadow-[#00D9FF]/30 transition-all flex items-center justify-center gap-2"
-          >
-            {expanded ? <Pause className="w-4 h-4" /> : <Play className="w-4 h-4" />}
-            {expanded ? 'Hide Details' : 'View Details'}
-          </button>
+          
 
           <div className="grid grid-cols-3 gap-2">
             <button
@@ -933,55 +927,7 @@ function SessionCard({ session, expanded, selected, onToggle, onSelect, onViewDe
         </div>
       </div>
 
-      <AnimatePresence>
-        {expanded && (
-          <motion.div
-            initial={{ height: 0, opacity: 0 }}
-            animate={{ height: 'auto', opacity: 1 }}
-            exit={{ height: 0, opacity: 0 }}
-            transition={{ duration: 0.2 }}
-            className="bg-black/40 border-t border-gray-700 overflow-hidden"
-          >
-            <div className="p-4 font-mono text-sm">
-              <div className="text-green-400 mb-2 flex items-center gap-2">
-                <span>$</span>
-                <span>Session Details:</span>
-              </div>
-              <div className="text-gray-400 space-y-1">
-                <div className="flex items-center gap-2">
-                  <MapPin className="w-3 h-3" />
-                  <span>IP:</span>
-                  <span className="text-[#00D9FF]">{session.ip}</span>
-                </div>
-                <div className="flex items-center gap-2">
-                  <Clock className="w-3 h-3" />
-                  <span>Started:</span>
-                  <span className="text-[#00D9FF]">{new Date(session.timestamp).toLocaleString()}</span>
-                </div>
-                <div className="flex items-center gap-2">
-                  <Shield className="w-3 h-3" />
-                  <span>Commands Executed:</span>
-                  <span className="text-[#00D9FF]">{session.commands}</span>
-                </div>
-                <div className="flex items-center gap-2">
-                  <Circle className="w-3 h-3" />
-                  <span>Risk Score:</span>
-                  <span className={`font-bold ${riskColors.text}`}>{session.risk}/10</span>
-                </div>
-              </div>
-              {session.commands > 0 ? (
-                <div className="mt-3 p-2 bg-yellow-500/10 border border-yellow-500/30 rounded text-yellow-400 text-xs">
-                  ⚠️ Attacker executed {session.commands} command{session.commands !== 1 ? 's' : ''}
-                </div>
-              ) : (
-                <div className="mt-3 text-gray-500 text-xs">
-                  No commands executed yet...
-                </div>
-              )}
-            </div>
-          </motion.div>
-        )}
-      </AnimatePresence>
+      
     </motion.div>
   );
 }

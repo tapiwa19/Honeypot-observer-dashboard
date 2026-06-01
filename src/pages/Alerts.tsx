@@ -671,10 +671,16 @@ export default function Alerts() {
     setActiveFilter('archived');
   };
 
-  const handleViewSolution = (alert: Alert) => {
+  const handleViewSolution = async (alert: Alert) => {
+  if (alert.sessionId && (!alert.commands || alert.commands.length === 0)) {
+    const commands = await fetchSessionCommands(alert.sessionId);
+    alert.commands = commands.map((c: Record<string, unknown>) => 
+      (c.input as string) || (c.command as string)
+    );
+  }
   const solution = ATTACK_SOLUTIONS[alert.type] || ATTACK_SOLUTIONS['default'];
   setCurrentSolution(solution);
-  setSelectedAlert(alert);  // ← add this line
+  setSelectedAlert(alert);
   setShowSolution(true);
 };
 
@@ -1276,69 +1282,48 @@ function SolutionModal({ alert, onClose }: {
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    const generateSolution = async () => {
-      setLoading(true);
-      setError(null);
-
-      const commandsText = alert.commands && alert.commands.length > 0
-        ? `Commands the attacker ran:\n${alert.commands.map(c => `  $ ${c}`).join('\n')}`
-        : 'No commands executed in this session.';
-
-      const prompt = `You are a cybersecurity incident responder analyzing a real honeypot attack.
-
-Attack details:
-- Event type: ${alert.type}
-- Severity: ${alert.severity.toUpperCase()}
-- Attacker IP: ${alert.sourceIp}
-- Country: ${alert.country}
-- Status: ${alert.status}
-- Description: ${alert.description}
-${commandsText}
-
-Based on these SPECIFIC details, provide a focused incident response plan. Structure your response exactly like this:
-
-## What happened
-One paragraph explaining exactly what this attacker did based on the event type and commands.
-
-## Immediate actions
-Numbered list of 4-6 specific steps to take RIGHT NOW, referencing the actual IP address and commands where relevant.
-
-## What to check
-3-4 specific things to investigate based on what this attacker actually did (e.g. if they ran wget, check for downloaded files).
-
-## Prevention
-3-4 targeted prevention measures specific to this attack vector.
-
-Keep it concise and technical. Reference the actual data (IP, commands, event type) — do not give generic advice.`;
-
-      try {
-        const response = await fetch('/api/ai/analyze', {
+  const generateSolution = async () => {
+    setLoading(true);
+    setError(null);
+ 
+    try {
+     const response = await fetch('http://localhost:5001/api/ai/analyze', {
   method: 'POST',
   headers: { 'Content-Type': 'application/json' },
-  body: JSON.stringify({ prompt })
+  body: JSON.stringify({
+    alertData: {
+      type: alert.type,
+      severity: alert.severity,
+      sourceIp: alert.sourceIp,
+      country: alert.country,
+      commands: alert.commands || [],
+      sessionDuration: 0,
+      commandCount: alert.commands?.length || 0,
+      risk: 0,
+    }
+  })
 });
 
 const data = await response.json();
 setAiResponse(data.text || 'No response generated');
-        
-          
-          
-     } catch (err) {
-  console.error('AI solution error:', err);
-  const fallback = ATTACK_SOLUTIONS[alert.type] || ATTACK_SOLUTIONS['default'];
-  setAiResponse(
-    `## What happened\n${alert.description}\n\n` +
-    `## Immediate actions\n${fallback.immediateSteps.map((s, i) => `${i+1}. ${s}`).join('\n')}\n\n` +
-    `## Prevention\n${fallback.prevention.map(s => `- ${s}`).join('\n')}\n\n` +
-    `## Tools needed\n${fallback.toolsNeeded.map(s => `- ${s}`).join('\n')}`
-  );
-} finally {
-  setLoading(false);
-}
-    };
-
-    generateSolution();
-  }, [alert]);
+ 
+    } catch (err) {
+      console.error('Intelligence error:', err);
+      // Fallback to static solutions
+      const fallback = ATTACK_SOLUTIONS[alert.type] || ATTACK_SOLUTIONS['default'];
+      setAiResponse(
+        `## What happened\n${alert.description}\n\n` +
+        `## Immediate actions\n${fallback.immediateSteps.map((s, i) => `${i+1}. ${s}`).join('\n')}\n\n` +
+        `## Prevention\n${fallback.prevention.map(s => `- ${s}`).join('\n')}`
+      );
+    } finally {
+      setLoading(false);
+    }
+  };
+ 
+  generateSolution();
+}, [alert]);
+ 
 
   const renderMarkdown = (text: string) => {
     return text

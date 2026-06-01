@@ -35,85 +35,83 @@ class AlertRulesEngine {
   // ============================================
 
   initializeDefaultRules() {
-    const defaults = [
-      // ── IMMEDIATE: High Risk Session ─────────────────
-      {
-        id: 'rule-high-risk-session',
-        name: 'High Risk Session Detection',
-        enabled: true,
-        trigger: {
-          type: 'brute_force',
-          threshold: 5,
-          timeWindow: 300
-        },
-        severity: 'critical',
-        escalateSeverity: true,
-        throttle: { type: 'immediate' },
-        routing: { email: true, slack: true, sms: true, ntfy: true },
-        deduplication: { enabled: true, window: 300, groupBy: 'session' },
-        description: 'Immediately alerts on any high risk session (risk >= 7)'
-      },
-      // ── IMMEDIATE: Command Execution ─────────────────
-      {
-        id: 'rule-command-execution',
-        name: 'Command Execution Detection',
-        enabled: true,
-        trigger: {
-          type: 'command_execution',
-          threshold: 3,
-          timeWindow: 120
-        },
-        severity: 'high',
-        escalateSeverity: false,
-        throttle: { type: 'immediate' },
-        routing: { email: true, slack: true, sms: true, ntfy: true },
-        deduplication: { enabled: true, window: 300, groupBy: 'session' },
-        description: 'Alerts immediately on suspicious command execution'
-      },
-      // ── IMMEDIATE: Credential Capture ────────────────
-      {
-        id: 'rule-credential-capture',
-        name: 'Credential Capture Detection',
-        enabled: true,
-        trigger: {
-          type: 'credential_capture',
-          threshold: 1,
-          timeWindow: 60
-        },
-        severity: 'critical',
-        escalateSeverity: false,
-        throttle: { type: 'immediate' },
-        routing: { email: true, slack: true, sms: true, ntfy: true },
-        deduplication: { enabled: true, window: 3600, groupBy: 'session' },
-        description: 'Alerts immediately on credential harvest'
-      },
-      // ── BATCH: Port Scan (less urgent) ───────────────
-      {
-        id: 'rule-port-scan',
-        name: 'Port Scan Detection',
-        enabled: true,
-        trigger: {
-          type: 'port_scan',
-          threshold: 10,
-          timeWindow: 60
-        },
-        severity: 'medium',
-        escalateSeverity: true,
-        throttle: { type: 'batch_5min' },
-        routing: { email: true, slack: true, sms: false, ntfy: false },
-        deduplication: { enabled: true, window: 300, groupBy: 'session' },
-        description: 'Detects port scanning activity - batched every 5 minutes'
-      }
-    ];
+  const defaults = [
+    {
+      id: 'rule-high-risk-session',
+      name: 'High Risk Session Detection',
+      enabled: true,
+      trigger: { type: 'brute_force', threshold: 5, timeWindow: 300 },
+      severity: 'critical',
+      throttle: { type: 'immediate' },
+      routing: { email: true, slack: true, ntfy: true },
+      deduplication: { enabled: true, window: 300, groupBy: 'session' },
+      description: 'High risk session detected (risk >= 7)'
+    },
+    {
+      id: 'rule-command-execution',
+      name: 'Command Execution Detection',
+      enabled: true,
+      trigger: { type: 'command_execution', threshold: 3, timeWindow: 120 },
+      severity: 'high',
+      throttle: { type: 'immediate' },
+      routing: { email: true, slack: true, ntfy: true },
+      deduplication: { enabled: true, window: 300, groupBy: 'session' },
+      description: 'Suspicious command execution detected'
+    },
+    {
+      id: 'rule-credential-capture',
+      name: 'Credential Capture Detection',
+      enabled: true,
+      trigger: { type: 'credential_capture', threshold: 1, timeWindow: 60 },
+      severity: 'critical',
+      throttle: { type: 'immediate' },
+      routing: { email: true, slack: true, ntfy: true },
+      deduplication: { enabled: true, window: 3600, groupBy: 'session' },
+      description: 'Credential harvest detected'
+    },
+    {
+      id: 'rule-port-scan',
+      name: 'Port Scan Detection',
+      enabled: true,
+      trigger: { type: 'port_scan', threshold: 10, timeWindow: 60 },
+      severity: 'medium',
+      throttle: { type: 'batch_5min' },
+      routing: { email: false, slack: true, ntfy: false },
+      deduplication: { enabled: true, window: 300, groupBy: 'session' },
+      description: 'Port scanning activity detected'
+    },
+    {
+      id: 'rule-successful-login',
+      name: 'Successful Login Detection',
+      enabled: true,
+      trigger: { type: 'successful_login', threshold: 1, timeWindow: 60 },
+      severity: 'high',
+      throttle: { type: 'immediate' },
+      routing: { email: true, slack: true, ntfy: true },
+      deduplication: { enabled: true, window: 300, groupBy: 'session' },
+      description: 'Attacker successfully authenticated'
+    },
+    {
+      id: 'rule-malware-download',
+      name: 'Malware Download Detection',
+      enabled: true,
+      trigger: { type: 'malware_download', threshold: 1, timeWindow: 60 },
+      severity: 'critical',
+      throttle: { type: 'immediate' },
+      routing: { email: true, slack: true, ntfy: true },
+      deduplication: { enabled: true, window: 3600, groupBy: 'session' },
+      description: 'Malware download attempt detected'
+    }
+  ];
 
-    this.rules = defaults.map(rule => ({
-      ...rule,
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString()
-    }));
+  this.rules = defaults.map(rule => ({
+    ...rule,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  }));
 
-    console.log(`✅ [AlertRulesEngine] ${this.rules.length} default rules loaded`);
-  }
+  console.log(`✅ [AlertRulesEngine] ${this.rules.length} default rules loaded`);
+}
 
   startBatchProcessors() {
     setInterval(() => this.processBatchQueue('batch_5min'),  300000);
@@ -175,133 +173,145 @@ class AlertRulesEngine {
   // ============================================
 
   async processAlert(incomingAlert) {
-    this.stats.totalAlertsProcessed++;
-    const results = {
-      triggered: [],
-      throttled: [],
-      deduplicated: [],
-      quietHoursSuppressed: []
-    };
+  this.stats.totalAlertsProcessed++;
+  const results = {
+    triggered: [],
+    throttled: [],
+    deduplicated: [],
+    quietHoursSuppressed: []
+  };
 
-    for (const rule of this.rules) {
-      if (!rule.enabled) continue;
+  // ── Only fire the HIGHEST priority matching rule ──
+  // Sort rules by severity priority
+  const priorityOrder = ['critical', 'high', 'medium', 'low'];
+  const sortedRules = [...this.rules]
+    .filter(r => r.enabled)
+    .sort((a, b) => 
+      priorityOrder.indexOf(a.severity) - priorityOrder.indexOf(b.severity)
+    );
 
-      // ── Deduplication check ───────────────────────────
-      if (rule.deduplication?.enabled) {
-        const isDuplicate = this.checkDeduplication(rule, incomingAlert);
-        if (isDuplicate) {
-          results.deduplicated.push(rule.id);
-          this.stats.totalAlertsDeduplicated++;
-          console.log(`🔁 [Dedup] Skipping duplicate for rule: ${rule.name}`);
-          continue;
-        }
-      }
+  let firedOnce = false; // ← Only fire ONE rule per alert
 
-      // ── Rule evaluation ───────────────────────────────
-      const matches = this.evaluateRule(rule, incomingAlert);
-      if (!matches) continue;
+  for (const rule of sortedRules) {
+    if (firedOnce) break; // ← Stop after first match
 
-      console.log(`✅ [Match] Rule matched: ${rule.name}`);
-
-      // ── Quiet hours check ─────────────────────────────
-      const isQuietHours = this.isWithinQuietHours(rule);
-      if (isQuietHours && rule.throttle?.quietHours) {
-        results.quietHoursSuppressed.push(rule.id);
-        this.stats.totalQuietHoursSuppressed++;
-        console.log(`🌙 [Quiet] Suppressed during quiet hours: ${rule.name}`);
-        continue;
-      }
-
-      // ── Throttle: immediate fires now ─────────────────
-      if (rule.throttle.type === 'immediate') {
-        const alertPayload = {
-          ruleId: rule.id,
-          ruleName: rule.name,
-          alert: {
-            ...incomingAlert,
-            severity: rule.severity,
-            title: incomingAlert.title || `🚨 ${rule.name}`,
-            description: incomingAlert.description || rule.description
-          },
-          throttleType: 'immediate'
-        };
-
-        results.triggered.push(alertPayload);
-        this.stats.totalAlertsTriggered++;
-
-        // ── Send notification directly if service available ──
-        if (this.notificationService) {
-          try {
-            await this.notificationService.sendAlert({
-              severity:    alertPayload.alert.severity,
-              title:       alertPayload.alert.title,
-              description: alertPayload.alert.description,
-              sourceIp:    incomingAlert.sourceIp  || 'unknown',
-              country:     incomingAlert.country   || 'unknown',
-              timestamp:   incomingAlert.timestamp || new Date().toISOString(),
-              type:        incomingAlert.type      || 'unknown'
-            });
-            console.log(`📱 [Notification] Sent for rule: ${rule.name} — IP: ${incomingAlert.sourceIp}`);
-          } catch (err) {
-            console.error(`❌ [Notification] Failed for rule ${rule.name}:`, err.message);
-          }
-        }
-
-      } else {
-        // ── Throttle: queue for batch ─────────────────────
-        this.queueAlert(rule.id, incomingAlert);
-        results.throttled.push(rule.id);
-        this.stats.totalAlertsThrottled++;
+    // ── Deduplication check ──────────────────────
+    if (rule.deduplication?.enabled) {
+      const isDuplicate = this.checkDeduplication(rule, incomingAlert);
+      if (isDuplicate) {
+        results.deduplicated.push(rule.id);
+        this.stats.totalAlertsDeduplicated++;
+        console.log(`🔁 [Dedup] Skipping duplicate for rule: ${rule.name}`);
+        firedOnce = true; // ← Count dedup as fired so nothing else fires
+        break;
       }
     }
 
-    console.log(`📊 [ProcessAlert] Triggered: ${results.triggered.length} | Throttled: ${results.throttled.length} | Dedup: ${results.deduplicated.length}`);
-    return results;
+    // ── Rule evaluation ──────────────────────────
+    const matches = this.evaluateRule(rule, incomingAlert);
+    if (!matches) continue;
+
+    console.log(`✅ [Match] Rule matched: ${rule.name}`);
+
+    // ── Quiet hours check ────────────────────────
+    const isQuietHours = this.isWithinQuietHours(rule);
+    if (isQuietHours && rule.throttle?.quietHours) {
+      results.quietHoursSuppressed.push(rule.id);
+      this.stats.totalQuietHoursSuppressed++;
+      console.log(`🌙 [Quiet] Suppressed during quiet hours: ${rule.name}`);
+      firedOnce = true;
+      break;
+    }
+
+    // ── Throttle: immediate fires now ───────────
+    if (rule.throttle.type === 'immediate') {
+      const alertPayload = {
+        ruleId: rule.id,
+        ruleName: rule.name,
+        alert: {
+          ...incomingAlert,
+          severity: incomingAlert.severity || rule.severity,
+          title: incomingAlert.title || `🚨 ${rule.name}`,
+          description: incomingAlert.description || rule.description
+        },
+        throttleType: 'immediate'
+      };
+
+      results.triggered.push(alertPayload);
+      this.stats.totalAlertsTriggered++;
+      firedOnce = true; // ← Mark as fired
+
+      // ── Send notification ────────────────────
+      if (this.notificationService) {
+        try {
+          await this.notificationService.sendAlert({
+            severity:    alertPayload.alert.severity,
+            title:       alertPayload.alert.title,
+            description: alertPayload.alert.description,
+            sourceIp:    incomingAlert.sourceIp  || 'unknown',
+            country:     incomingAlert.country   || 'unknown',
+            timestamp:   incomingAlert.timestamp || new Date().toISOString(),
+            type:        incomingAlert.type      || 'unknown'
+          });
+          console.log(`📱 [Notification] Sent for rule: ${rule.name} — IP: ${incomingAlert.sourceIp}`);
+        } catch (err) {
+          console.error(`❌ [Notification] Failed for rule ${rule.name}:`, err.message);
+        }
+      }
+
+    } else {
+      // ── Throttle: queue for batch ────────────
+      this.queueAlert(rule.id, incomingAlert);
+      results.throttled.push(rule.id);
+      this.stats.totalAlertsThrottled++;
+      firedOnce = true;
+    }
   }
 
+  console.log(`📊 [ProcessAlert] Triggered: ${results.triggered.length} | Throttled: ${results.throttled.length} | Dedup: ${results.deduplicated.length}`);
+  return results;
+}
   // ============================================
   // RULE EVALUATION
   // ============================================
+evaluateRule(rule, alert) {
+  const { trigger } = rule;
 
-  evaluateRule(rule, alert) {
-    const { trigger } = rule;
+  switch (trigger.type) {
+    case 'brute_force':
+      return (
+        alert.type === 'Brute Force' ||
+        alert.type === 'brute_force' ||
+        (alert.commandCount && alert.commandCount >= 5)
+      );
 
-    switch (trigger.type) {
-      case 'brute_force':
-        return (
-          alert.type === 'brute_force' ||
-          (alert.failedAttempts && alert.failedAttempts >= (trigger.threshold || 5)) ||
-          (alert.commandCount   && alert.commandCount   >= 5)
-        );
+    case 'successful_login':
+      return alert.type === 'successful_login' || alert.type === 'Brute Force';
 
-      case 'credential_capture':
-        return alert.type === 'credential_capture' || alert.hasCredentials === true;
+    case 'credential_capture':
+      return alert.type === 'credential_capture' || alert.hasCredentials === true;
 
-      case 'command_execution':
-        return (
-          alert.type === 'command_execution' ||
-          alert.type === 'brute_force'       ||   // high risk sessions also match
-          (alert.commandCount && alert.commandCount >= (trigger.threshold || 3))
-        );
+    case 'command_execution':
+      return (
+        alert.type === 'Command Injection' ||
+        alert.type === 'command_execution' ||
+        alert.type === 'Reconnaissance' ||
+        (alert.commandCount && alert.commandCount >= (trigger.threshold || 3))
+      );
 
-      case 'port_scan':
-        return (
-          alert.type === 'port_scan' ||
-          (alert.portsScanned && alert.portsScanned >= (trigger.threshold || 10))
-        );
+    case 'malware_download':
+      return alert.type === 'Malware Download' || alert.type === 'malware_download';
 
-      case 'custom':
-        try {
-          return eval(trigger.customCondition);
-        } catch (error) {
-          console.error('Error evaluating custom condition:', error);
-          return false;
-        }
+    case 'port_scan':
+      return (
+        alert.type === 'port_scan' ||
+        (alert.portsScanned && alert.portsScanned >= (trigger.threshold || 10))
+      );
 
-      default:
-        return false;
-    }
+    default:
+      return false;
   }
+}
 
   // ============================================
   // DEDUPLICATION
