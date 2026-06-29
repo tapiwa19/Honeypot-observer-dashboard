@@ -152,6 +152,8 @@ export function generateIntelligence(alertData) {
     whatHappened = `An attacker from ${sourceIp} (${country}) successfully authenticated to the SSH honeypot. Login was achieved through credential guessing — they tried passwords until one worked. This represents a complete authentication bypass.`;
   } else if (type.includes('brute_force') || type.includes('login.failed')) {
     whatHappened = `An automated brute force attack originated from ${sourceIp} (${country}). The attacker ran a credential stuffing tool against the SSH service, trying common username/password combinations from a wordlist. Risk level: ${risk}/10.`;
+  } else if ((commandCount || commands.length) === 0) {
+    whatHappened = `A ${severity} severity security event was detected from ${sourceIp} (${country}). An SSH connection was observed, but no shell commands were captured in the session logs. The event remains concerning with a risk score of ${risk}/10.`;
   } else {
     whatHappened = `A ${severity} severity security event was detected from ${sourceIp} (${country}). The attacker established an SSH connection and performed ${commandCount || commands.length} actions against the honeypot system.`;
   }
@@ -230,7 +232,8 @@ export function generateIntelligence(alertData) {
   const mitre = analysis.techniques;
 
   // ── Threat summary ────────────────────────────────
-  const threatScore = Math.min(10,
+  const riskScore = typeof risk === 'number' && risk > 0 ? Math.min(10, Math.round(risk)) : 0;
+  const patternScore = Math.min(10,
     (analysis.detected.reverse_shell ? 4 : 0) +
     (analysis.detected.cryptominer ? 3 : 0) +
     (analysis.detected.persistence ? 3 : 0) +
@@ -239,6 +242,7 @@ export function generateIntelligence(alertData) {
     (analysis.detected.reconnaissance ? 1 : 0) +
     (skillAssessment.score > 5 ? 2 : 0)
   );
+  const threatScore = Math.max(riskScore, patternScore);
 
   return {
     summary: {

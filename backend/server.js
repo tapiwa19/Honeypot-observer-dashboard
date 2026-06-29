@@ -1342,7 +1342,12 @@ app.get('/api/analytics/behavioral', async (req, res) => {
     const determineTacticsLocal = (events) => {
       const tactics = [];
       const totalCommands = events.filter(e => e.eventid === 'cowrie.command.input').length;
-      const highRisk = events.some(e => e.risk >= 7);
+      const hasDownload = events.some(e => e.eventid === 'cowrie.session.file_download');
+      const highRisk = hasDownload || events.some(e => {
+        const cmd = String(e.command_input || e.message || '').toLowerCase();
+        return /\b(cancel|chmod|chown|nc|bash -i|python|perl|ruby|\bbase64\b|curl .*bash|wget .*sh|mkfifo|\/dev\/tcp)\b/.test(cmd);
+      });
+
       tactics.push('Initial Access (T1078)');
       if (totalCommands > 0) tactics.push('Execution (T1059)');
       if (highRisk || totalCommands > 10) tactics.push('Persistence (T1136)');
@@ -1356,7 +1361,50 @@ app.get('/api/analytics/behavioral', async (req, res) => {
       return tactics;
     };
 
-    const profiles = Array.from(ipMap.entries()).map(([ip, events], idx) => {
+    const computeSkillLevel = (totalCommands, duration, events) => {
+      const commandText = events.map(e => String(e.command_input || e.message || '').toLowerCase()).join(' ');
+      const hasAdvanced = /\b(nmap|nc|curl .*bash|wget .*sh|python|perl|ruby|base64|chmod|chown|sudo|su\b|mkfifo|\/dev\/tcp|cron|crontab)\b/.test(commandText);
+      if (totalCommands === 0) return 'Script Kiddie';
+      if (hasAdvanced && duration > 300) return 'Advanced';
+      if (hasAdvanced || totalCommands > 12) return 'Intermediate';
+      return 'Script Kiddie';
+    };
+
+    const computeSuccessRate = (events) => {
+      const loginEvents = events.filter(e => e.eventid === 'cowrie.login.success' || e.eventid === 'cowrie.login.failed');
+      const successCount = events.filter(e => e.eventid === 'cowrie.login.success').length;
+      if (loginEvents.length === 0) return 0;
+      return Math.round((successCount / loginEvents.length) * 100);
+    };
+
+    const extractTools = (events) => {
+      const tools = new Set();
+      const commandText = events.map(e => String(e.command_input || e.message || '').toLowerCase()).join(' ');
+      if (/\bnmap\b/.test(commandText)) tools.add('Nmap');
+      if (/\bcurl\b/.test(commandText)) tools.add('curl');
+      if (/\bwget\b/.test(commandText)) tools.add('wget');
+      if (/\bnc\b|\bnetcat\b/.test(commandText)) tools.add('Netcat');
+      if (/\bpython\b/.test(commandText)) tools.add('Python');
+      if (/\bperl\b/.test(commandText)) tools.add('Perl');
+      if (/\bruby\b/.test(commandText)) tools.add('Ruby');
+      if (/\bssh\b/.test(commandText) && commandText.includes('ssh ')) tools.add('SSH');
+      if (events.some(e => e.eventid === 'cowrie.client.version' && e.version)) {
+        tools.add(`SSH Client: ${events.find(e => e.eventid === 'cowrie.client.version').version}`);
+      }
+      return Array.from(tools).slice(0, 6);
+    };
+
+    const computeThreatScore = (events, totalCommands, successRate) => {
+      const hasDownload = events.some(e => e.eventid === 'cowrie.session.file_download');
+      const hasSuccessfulLogin = events.some(e => e.eventid === 'cowrie.login.success');
+      const hasAdvanced = /\b(nmap|nc|curl .*bash|wget .*sh|python|perl|ruby|base64|chmod|chown|sudo|su\b|mkfifo|\/dev\/tcp|cron|crontab)\b/.test(events.map(e => String(e.command_input || e.message || '').toLowerCase()).join(' '));
+      const base = Math.min(10, Math.round(totalCommands * 0.35 + successRate * 0.08 + (hasAdvanced ? 2 : 0) + (hasDownload ? 2 : 0)));
+      if (hasDownload) return Math.max(base, 8);
+      if (hasSuccessfulLogin) return Math.max(base, 6);
+      return Math.max(base, 2);
+    };
+
+    const profiles = Array.from(ipMap.entries()).map(([ip, events]) => {
       const geoData = getCountryFromIP(ip);
 
       // group by session for duration/commands/services
@@ -1370,6 +1418,10 @@ app.get('/api/analytics/behavioral', async (req, res) => {
       let totalDuration = 0;
       let totalCommands = 0;
       const serviceSet = new Set();
+      const sessionIds = new Set();
+      const ips = new Set([ip]);
+      let firstSeen = null;
+      let lastSeen = null;
 
       sessionMap.forEach(evts => {
         evts.sort((a, b) => new Date(a['@timestamp']) - new Date(b['@timestamp']));
@@ -1379,6 +1431,10 @@ app.get('/api/analytics/behavioral', async (req, res) => {
         evts.forEach(evt => {
           if (evt.eventid === 'cowrie.command.input') totalCommands++;
           if (evt.service) serviceSet.add(evt.service);
+          if (evt.session) sessionIds.add(evt.session);
+          const ts = new Date((evt['@timestamp'] || evt.timestamp || '').replace(/(\.\d{3})\d+/, '$1'));
+          if (!firstSeen || ts < firstSeen) firstSeen = ts;
+          if (!lastSeen || ts > lastSeen) lastSeen = ts;
         });
       });
 
@@ -1386,19 +1442,25 @@ app.get('/api/analytics/behavioral', async (req, res) => {
       const uniqueCommands = totalCommands;
       const targetedServices = serviceSet.size > 0 ? Array.from(serviceSet) : ['SSH'];
       const tactics = determineTacticsLocal(events);
+      const successRate = computeSuccessRate(events);
+      const tools = extractTools(events);
+      const skillLevel = computeSkillLevel(totalCommands, avgSessionDuration, events);
+      const threatScore = computeThreatScore(events, totalCommands, successRate);
 
       return {
         id: ip,
-        skillLevel: 'unknown',
-        threatScore: Math.min(10, totalCommands),
+        skillLevel,
+        threatScore,
         totalAttacks: events.length,
-        successRate: 0,
-        tools: [],
+        successRate,
+        tools,
         countries: [geoData.flag + ' ' + geoData.country],
         tactics,
         targetedServices,
         avgSessionDuration,
-        uniqueCommands
+        uniqueCommands,
+        firstSeen: firstSeen ? firstSeen.toISOString() : undefined,
+        lastActivity: lastSeen ? lastSeen.toISOString() : undefined
       };
     });
 
@@ -1428,9 +1490,18 @@ app.get('/api/analytics/behavioral', async (req, res) => {
   }
 });
     const vulnerabilities = Array.from(vulnMap.entries())
-      .sort(([,a],[,b]) => b - a)
-      .slice(0, 3)
-      .map(([cve,count]) => ({ cve, name: cve, severity: 0, targetFrequency: count, successRate: 0 }));
+      .map(([cve, info]) => ({
+        cve,
+        name: cve,
+        severity: Math.min(10, 4 + Math.ceil(info.count / 2)),
+        targetFrequency: info.count,
+        successRate: info.count > 0 ? Math.round((info.successCount / info.count) * 100) : 0,
+        affectedSystems: Array.from(info.ips),
+        firstTargeted: info.firstSeen,
+        lastTargeted: info.lastSeen
+      }))
+      .sort((a, b) => b.targetFrequency - a.targetFrequency)
+      .slice(0, 3);
 
 
     // build MITRE counts from the tactics arrays in our top profiles

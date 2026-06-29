@@ -513,7 +513,8 @@ export function Dashboard({ onNavigate }: DashboardProps) {
   );
 }
  
-// ✅ FIXED: RecentAlertsPanel with correct time formatting
+// RecentAlertsPanel with correct time formatting
+
 function RecentAlertsPanel({
   onNavigate,
   socket
@@ -600,7 +601,7 @@ function RecentAlertsPanel({
         .sort((a, b) => new Date(String(b.timestamp)).getTime() - new Date(String(a.timestamp)).getTime())
         .slice(0, 4)
         .map((attack) => {
-          // ✅ FIX 5: Only call formatTimeAgo if timestamp looks like a real ISO date
+          //  Only call formatTimeAgo if timestamp looks like a real ISO date
           // Your server already pre-formats some timestamps as "just now", "5m ago" etc.
           // If we run formatTimeAgo on those strings, we get "NaN ago" or wrong output
           const timestamp = String(attack.timestamp || '');

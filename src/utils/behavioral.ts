@@ -79,8 +79,8 @@ export function processAttackerProfiles(
 
   // Enhance profiles with real data
   return profiles.map((profile, index) => {
-    // Get sessions for this profile (match by index for demo, in production match by IP)
-    const ipSessions = Array.from(ipSessionMap.values())[index] || [];
+    // Get sessions for this profile by IP, matching the backend profile ID
+    const ipSessions = ipSessionMap.get(profile.id) || [];
 
     // Calculate tactics used based on session behavior
     const tactics = determineTactics(ipSessions);

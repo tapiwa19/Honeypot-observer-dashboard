@@ -31,6 +31,7 @@ interface Alert {
   commands?: string[];
   evidenceData?: Record<string, unknown>;
   isNew?: boolean; // ✅ NEW: Flag for highlighting new real-time alerts
+  risk?: number;
 }
 
 interface AlertRule {
@@ -236,6 +237,17 @@ const determineAlertType = (attack: Record<string, unknown>): string => {
   return 'default';
 };
 
+const resolveRiskScore = (
+  rawRisk: unknown,
+  severity: 'critical' | 'high' | 'medium' | 'low'
+): number => {
+  if (typeof rawRisk === 'number' && rawRisk > 0) return rawRisk;
+  if (severity === 'critical') return 9;
+  if (severity === 'high') return 7;
+  if (severity === 'medium') return 5;
+  return 3;
+};
+
 const isAttackActive = (attackTimestamp: string): boolean => {
   const now = new Date();
   const attackTime = new Date(attackTimestamp);
@@ -401,11 +413,12 @@ export default function Alerts() {
 
   // ✅ NEW: Add real-time alert from WebSocket
   const addRealtimeAlert = useCallback((alertData: Partial<Alert>) => {
+    const severity = alertData.severity || 'medium';
     const newAlert: Alert = {
       id: alertData.id || `realtime-${Date.now()}`,
       title: alertData.title || 'Real-time Alert',
       description: alertData.description || 'Security event detected',
-      severity: alertData.severity || 'medium',
+      severity,
       sourceIp: alertData.sourceIp || 'unknown',
       country: alertData.country || 'Unknown',
       flag: alertData.flag || '🌍',
@@ -413,7 +426,8 @@ export default function Alerts() {
       status: 'active',
       type: alertData.type || 'connection',
       attackTime: new Date(),
-      isNew: true
+      isNew: true,
+      risk: resolveRiskScore(alertData.risk, severity),
     };
 
     setAlerts(prev => [newAlert, ...prev]);
@@ -465,25 +479,23 @@ export default function Alerts() {
     });
 
     ws.on('new_session', (sessionData: Record<string, unknown>) => {
-      console.log('🚨 [WEBSOCKET] New session:', sessionData);
-      
-      const risk = (sessionData.risk as number) || 0;
-      if (risk >= 7) {
+    const risk = (sessionData.risk as number) || 0;
+    if (risk >= 7) {
         const severity = risk >= 9 ? 'critical' : 'high';
-        
         addRealtimeAlert({
-          id: `session-${sessionData.sessionId as string}`,
-          severity,
-          title: `${severity === 'critical' ? '🚨 CRITICAL' : '⚠️ HIGH RISK'} Attack Session`,
-          description: `New SSH attack from ${sessionData.ip as string} (${(sessionData.countryName as string) || (sessionData.country as string)}) - Risk: ${risk}/10`,
-          sourceIp: sessionData.ip as string,
-          country: (sessionData.countryName as string) || (sessionData.country as string),
-          flag: sessionData.country as string,
-          type: 'command_execution',
-          sessionId: sessionData.sessionId as string
+            id: `session-${sessionData.sessionId as string}`,
+            severity,
+            title: `${severity === 'critical' ? '🚨 CRITICAL' : '⚠️ HIGH RISK'} Attack Session`,
+            description: `New SSH attack from ${sessionData.ip as string} (${(sessionData.countryName as string) || (sessionData.country as string)}) - Risk: ${risk}/10`,
+            sourceIp: sessionData.ip as string,
+            country: (sessionData.countryName as string) || 'Unknown', // ← use countryName not country
+            flag: sessionData.country as string,                        // ← country field from backend IS the flag
+            type: 'command_execution',
+            sessionId: sessionData.sessionId as string,
+            risk: risk,
         });
-      }
-    });
+    }
+});
 
     ws.on('new_attack', (attackData: Record<string, unknown>) => {
       console.log('🔥 [WEBSOCKET] New attack:', attackData);
@@ -505,7 +517,8 @@ export default function Alerts() {
           sourceIp: attackData.ip as string,
           country: attackData.country as string,
           flag: attackData.flag as string,
-          type: determineAlertType(attackData)
+          type: determineAlertType(attackData),
+          risk: resolveRiskScore(attackData.risk, severity)
         });
       }
     });
@@ -555,7 +568,8 @@ export default function Alerts() {
           type: alertType,
           sessionId: attack.session as string,
           attackTime: new Date(attackTimestamp),
-          commands: []
+          commands: [],
+          risk: resolveRiskScore(attack.risk, severity),
         };
       });
       
@@ -761,7 +775,7 @@ export default function Alerts() {
   // Effects
   useEffect(() => {
     fetchAlerts();
-    // ✅ REMOVED polling - WebSocket handles real-time updates now!
+    // - WebSocket handles real-time updates now!
   }, [statsResetAt, fetchAlerts]);
 
   const resetStats = () => {
@@ -1292,16 +1306,21 @@ function SolutionModal({ alert, onClose }: {
   headers: { 'Content-Type': 'application/json' },
   body: JSON.stringify({
     alertData: {
-      type: alert.type,
-      severity: alert.severity,
-      sourceIp: alert.sourceIp,
-      country: alert.country,
-      commands: alert.commands || [],
-      sessionDuration: 0,
-      commandCount: alert.commands?.length || 0,
-      risk: 0,
+        type: alert.type,
+        severity: alert.severity,
+        sourceIp: alert.sourceIp,
+        country: alert.country || 'Unknown',    // ← now correct country name
+        commands: alert.commands || [],
+        sessionDuration: 0,
+        commandCount: alert.commands?.length ?? 0,
+        risk: (typeof alert.risk === 'number' && alert.risk > 0) ? alert.risk : (
+    alert.severity === 'critical' ? 9
+  : alert.severity === 'high'     ? 7
+  : alert.severity === 'medium'   ? 5
+  : 3
+),
     }
-  })
+})
 });
 
 const data = await response.json();
@@ -1728,6 +1747,12 @@ function InvestigationModal({ alert, onClose }: { alert: Alert; onClose: () => v
                     <span className="text-gray-600">Threat Level:</span>
                     <span className="font-bold text-orange-600">
                       {alert.severity === 'critical' ? 'CRITICAL' : alert.severity === 'high' ? 'HIGH' : 'MEDIUM'}
+                    </span>
+                  </div>
+                  <div className="flex justify-between text-sm">
+                    <span className="text-gray-600">Risk Score:</span>
+                    <span className="font-bold text-orange-600">
+                      {(alert.risk ?? (alert.severity === 'critical' ? 9 : alert.severity === 'high' ? 7 : alert.severity === 'medium' ? 5 : 3))}/10
                     </span>
                   </div>
                   <div className="flex justify-between text-sm">
