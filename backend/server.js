@@ -95,10 +95,10 @@ app.use((req, res, next) => {
 app.use('/api/auth', authRouter);
 
 // ✅ NEW: Register notification routes
-app.use('/api/notifications', notificationRouter);
+app.use('/api/notifications', authenticateToken, notificationRouter);
 
 // ✅ NEW: Register alert rules routes
-app.use('/api/alerts', alertRulesRouter);
+app.use('/api/alerts', authenticateToken, alertRulesRouter);
 
 //Only protect sensitive routes that modify data or require admin access
 // Read-only analytics/data endpoints (dashboard, analytics, sessions, credentials) are PUBLIC
@@ -1459,8 +1459,8 @@ app.get('/api/analytics/behavioral', async (req, res) => {
         targetedServices,
         avgSessionDuration,
         uniqueCommands,
-        firstSeen: firstSeen ? firstSeen.toISOString() : undefined,
-        lastActivity: lastSeen ? lastSeen.toISOString() : undefined
+        firstSeen: firstSeen ? new Date(firstSeen.toISOString().replace(/(\.\d{3})\d+Z$/, '$1Z')) .toISOString() : undefined,
+        lastActivity: lastSeen ? new Date(lastSeen.toISOString().replace(/(\.\d{3})\d+Z$/, '$1Z')).toISOString() : undefined
       };
     });
 
